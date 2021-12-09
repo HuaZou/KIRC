@@ -10,7 +10,7 @@ The project is aim to use Deep learning methods on Omics-data, including RNA-seq
 
 The overall workflow which designed in the *Deep Learning based multi-omics integration robustly predicts survival in liver cancer*.
 
-<img src="workflow.png" style="zoom:150%;" />
+<img src="../workflow.png" style="zoom:150%;" />
 
 (A) Autoencoder architecture used to integrate 3 omics of HCC data. 
 
@@ -258,7 +258,7 @@ All the files which used in this project are restored in the google cloud. the w
 
 There are only two partners to collaborate this project right now, and we hope it would be successful in the future.
 
-**Xingxin Pan: panxingxin2020@gmail.com**
+**Xingxin Pan: panxingxin2020@gmail.com **
 
 **Hua Zou: zouhua1@outlook.com**
 
