@@ -1,0 +1,226 @@
+---
+title: "Summary the models' performance"
+date: "Created: 2021-04-25; updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(pROC)
+library(ggplot2)
+
+# rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+```
+
+
+### load data 
+```{r}
+all_model_svm <- readRDS("../../Result/classification/Evaluation/all_model_svm_all.RDS")
+```
+
+
+### Function
+```{r}
+### Summary ROC
+summary_ROC <- function(dat_list=all_model_svm,
+                        tag="all"){
+  
+  # dat_list=all_model_svm
+  # tag="all"
+  
+  if(tag == "all"){
+    rocboj_list <- dat_list$rocobj_all
+    auc_list <- dat_list$auc_all
+  }else if(tag == "mRNA"){
+    rocboj_list <- dat_list$rocobj_mRNA
+    auc_list <- dat_list$auc_mRNA    
+  }else if(tag == "CNV"){
+    rocboj_list <- dat_list$rocobj_CNV
+    auc_list <- dat_list$auc_CNV    
+  }else if(tag == "Methylation"){
+    rocboj_list <- dat_list$rocobj_Methylation
+    auc_list <- dat_list$auc_Methylation    
+  }else if(tag == "RPPA"){
+    rocboj_list <- dat_list$rocobj_RPPA
+    auc_list <- dat_list$auc_RPPA    
+  }
+  
+  colors_value <- c("#A6CEE3", "#1F78B4", "#08306B", "#B2DF8A", "#006D2C", 
+              "#8E0152", "#DE77AE", "#CAB2D6", "#6A3D9A", "#FB9A99")
+  
+  pl <- ggroc(rocboj_list, linetype = 1, size = 1, alpha = 1, legacy.axes = T)+
+          geom_abline(intercept = 0, slope = 1, color="grey", size = 1, linetype=1)+
+          labs(x = "False Positive Rate (1 - Specificity)",
+               y = "True Positive Rate (Sensivity or Recall)")+
+          geom_label(aes(x = .75, y = .50, label=paste0("AUC = ", auc_list[[1]], "(i=1)")),
+                   size = 5, family="serif", color=colors_value[1])+
+          geom_label(aes(x = .75, y = .45, label=paste0("AUC = ", auc_list[[2]], "(i=2)")),
+                   size = 5, family="serif", color=colors_value[2])+
+          geom_label(aes(x = .75, y = .40, label=paste0("AUC = ", auc_list[[3]], "(i=3)")),
+                   size = 5, family="serif", color=colors_value[3])+
+          geom_label(aes(x = .75, y = .35, label=paste0("AUC = ", auc_list[[4]], "(i=4)")),
+                   size = 5, family="serif", color=colors_value[4])+
+          geom_label(aes(x = .75, y = .30, label=paste0("AUC = ", auc_list[[5]], "(i=5)")),
+                   size = 5, family="serif", color=colors_value[5])+
+          geom_label(aes(x = .75, y = .25, label=paste0("AUC = ", auc_list[[6]], "(i=6)")),
+                   size = 5, family="serif", color=colors_value[6])+
+          geom_label(aes(x = .75, y = .20, label=paste0("AUC = ", auc_list[[7]], "(i=7)")),
+                   size = 5, family="serif", color=colors_value[7])+
+          geom_label(aes(x = .75, y = .15, label=paste0("AUC = ", auc_list[[8]], "(i=8)")),
+                   size = 5, family="serif", color=colors_value[8])+    
+          geom_label(aes(x = .75, y = .10, label=paste0("AUC = ", auc_list[[9]], "(i=9)")),
+                   size = 5, family="serif", color=colors_value[9])+
+          geom_label(aes(x = .75, y = .05, label=paste0("AUC = ", auc_list[[10]], "(i=10)")),
+                   size = 5, family="serif", color=colors_value[10])+            
+          coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))+
+          scale_colour_manual(values = colors_value)+
+          guides(color=F)+
+          theme_bw()+
+          theme(panel.background = element_rect(fill = 'transparent'),
+                axis.ticks.length = unit(0.4, "lines"), 
+                axis.ticks = element_line(color='black'),
+                axis.line = element_line(size=.5, colour = "black"),
+                axis.title = element_text(colour='black', size=12,face = "bold"),
+                axis.text = element_text(colour='black',size=10),
+                text = element_text(size=8, color="black", family="serif"))
+  return(pl)
+}
+
+### Summary Evalution
+summary_Evalution <- function(dat_list=all_model_svm,
+                              tag="all"){
+  
+  # dat_list=all_model_svm
+  # tag="all"
+  
+  if(tag == "all"){
+    Evalution_list <- dat_list$Eva_all
+  }else if(tag == "mRNA"){
+    Evalution_list <- dat_list$Eva_mRNA    
+  }else if(tag == "CNV"){
+    Evalution_list <- dat_list$Eva_CNV   
+  }else if(tag == "Methylation"){
+    Evalution_list <- dat_list$Eva_Methylation   
+  }else if(tag == "RPPA"){
+    Evalution_list <- dat_list$Eva_RPPA
+  }
+  
+  ci_res <- data.frame()
+  surv_res <- data.frame()
+  bsc_res <- data.frame()
+  for(i in 1:length(Evalution_list)){
+    ci_res <- rbind(ci_res, 
+                    Evalution_list[[i]]$ci_res %>% mutate(Times=i))
+    surv_res <- rbind(surv_res, 
+                    Evalution_list[[i]]$surv_res %>% mutate(Times=i))
+    bsc_res <- rbind(bsc_res, 
+                    Evalution_list[[i]]$bsc_res %>% mutate(Times=i))    
+  }
+  
+  # mean 
+  ci_final <- ci_res %>% group_by(Type) %>%
+    summarise(C_index_mean=mean(C_index),
+              C_index_sd=sd(C_index),
+              pvalue_mean=mean(pvalue))
+  surv_final <- surv_res %>% group_by(Type) %>%
+    summarise(Wald_pvlaue_mean=mean(Wald_pvlaue),
+              lg_rank_pvlaue_mean=sd(lg_rank_pvlaue)) 
+  bsc_final <- bsc_res %>% group_by(Type) %>%
+    summarise(Brier_score_mean=mean(Brier_score),
+              Brier_score_sd=sd(Brier_score))
+  
+  res <- cbind(ci_final, surv_final, bsc_final)
+  
+  # res <- list(ci=ci_final, surv=surv_final, bsc=bsc_final)
+  
+  return(res)
+}
+```
+
+
+### SVM 
+
+#### ROC
+```{r, fig.height=6, fig.width=8}
+if(!dir.exists("../../Result/figure/classification")){
+  dir.create("../../Result/figure/classification")
+}
+
+# all 
+all_model_svm_ROC_all <- summary_ROC(dat_list = all_model_svm, tag = "all")
+all_model_svm_ROC_all
+ggsave("../../Result/figure/classification/all_model_svm_ROC_all.pdf",
+       all_model_svm_ROC_all, height = 6, width = 8, dpi = 600)
+
+# mRNA 
+all_model_svm_ROC_mRNA <- summary_ROC(dat_list = all_model_svm, tag = "mRNA")
+all_model_svm_ROC_mRNA
+ggsave("../../Result/figure/classification/all_model_svm_ROC_mRNA.pdf",
+       all_model_svm_ROC_mRNA, height = 6, width = 8, dpi = 600)
+
+# CNV 
+all_model_svm_ROC_CNV <- summary_ROC(dat_list = all_model_svm, tag = "CNV")
+all_model_svm_ROC_CNV
+ggsave("../../Result/figure/classification/all_model_svm_ROC_CNV.pdf",
+       all_model_svm_ROC_CNV, height = 6, width = 8, dpi = 600)
+
+# Methylation 
+all_model_svm_ROC_Methylation <- summary_ROC(dat_list = all_model_svm, tag = "Methylation")
+all_model_svm_ROC_Methylation
+ggsave("../../Result/figure/classification/all_model_svm_ROC_Methylation.pdf",
+       all_model_svm_ROC_Methylation, height = 6, width = 8, dpi = 600)
+
+# RPPA 
+all_model_svm_ROC_RPPA <- summary_ROC(dat_list = all_model_svm, tag = "RPPA")
+all_model_svm_ROC_RPPA
+ggsave("../../Result/figure/classification/all_model_svm_ROC_RPPA.pdf",
+       all_model_svm_ROC_RPPA, height = 6, width = 8, dpi = 600)
+```
+
+#### Evalution
+```{r}
+if(!dir.exists("../../Result/classification/Evaluation")){
+  dir.create("../../Result/classification/Evaluation")
+}
+# all
+All_model_svm_Evalution_all <- summary_Evalution(dat_list = all_model_svm, tag = "all")
+DT::datatable(All_model_svm_Evalution_all)
+write.csv(All_model_svm_Evalution_all, "../../Result/classification/Evaluation/All_model_svm_Evalution_all.csv", row.names = F)
+
+# all
+All_model_svm_Evalution_mRNA <- summary_Evalution(dat_list = all_model_svm, tag = "mRNA")
+DT::datatable(All_model_svm_Evalution_mRNA)
+write.csv(All_model_svm_Evalution_mRNA, "../../Result/classification/Evaluation/All_model_svm_Evalution_mRNA.csv", row.names = F)
+
+# CNV
+All_model_svm_Evalution_CNV <- summary_Evalution(dat_list = all_model_svm, tag = "CNV")
+DT::datatable(All_model_svm_Evalution_CNV)
+write.csv(All_model_svm_Evalution_CNV, "../../Result/classification/Evaluation/All_model_svm_Evalution_CNV.csv", row.names = F)
+
+# Methylation
+All_model_svm_Evalution_Methylation <- summary_Evalution(dat_list = all_model_svm, tag = "Methylation")
+DT::datatable(All_model_svm_Evalution_Methylation)
+write.csv(All_model_svm_Evalution_Methylation, "../../Result/classification/Evaluation/All_model_svm_Evalution_Methylation.csv", row.names = F)
+
+# RPPA
+All_model_svm_Evalution_RPPA <- summary_Evalution(dat_list = all_model_svm, tag = "RPPA")
+DT::datatable(All_model_svm_Evalution_RPPA)
+write.csv(All_model_svm_Evalution_RPPA, "../../Result/classification/Evaluation/All_model_svm_Evalution_RPPA.csv", row.names = F)
+```
+
+
+### Systemic information
+```{r}
+sessionInfo()
+```
+
+

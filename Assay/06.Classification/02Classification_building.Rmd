@@ -1,0 +1,629 @@
+---
+title: "Classification: Building model"
+date: "Created: 2021-01-20; updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(data.table)
+library(caret)
+library(pROC)
+
+rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+
+grp <- c("S1", "S2")
+grp.col <- c("#6C326C", "#77A2D1")
+```
+
+### Introduction
+
+#### Building model
+
+========================================================================
+
+**Part1:  the notices in model**
+
+========================================================================
+
+* Algorithm: 
+
+  * Bayesian (Stacking)
+  
+  * RandomForest (Bagging: without scaling)
+  
+  * Logistic Regression (Stacking)
+  
+  * Support Vector Machines (Stacking)
+  
+  * Stochastic Gradient Boosting (Boosting)
+  
+  * Ensemble Model
+  
+
+* Normalization: **Data for the algorithm used the distance metrics should be Scaled**
+
+  * Median scale normalization for 1st step 
+  
+  * Robust scale normalization for mRNA and DNA methylation data 
+  
+  * Unit scale normalization for CopyNumber and Reverse Phase Protein Arrays (protein RPPA)
+  
+  * Rank normalization for predicting a single sample
+  
+
+* Cross validation
+
+  * method: repeated cv 
+  
+  * times: 3 
+  
+  * fold: 10
+
+  
+* Data Partition Probability: p=0.8
+
+
+* Tuning Parameters:
+
+  * Search training model parameters: grid/random in `trainControl` function
+  
+  * set Algorithm parameters: `expand.grid` function
+  
+
+* Evaluate Accuracy of models
+
+  * Accuracy/Kappa by model(ROC/AUC)
+  
+  * Concordance index (R `survcomp` package)
+  
+  * Log-rank p-value of Cox-PH regression (R `survival` package)
+  
+  * Brier score (R `survcomp` package)
+  
+
+* Ensemble Model Algorithm
+
+  * Bayesian (Stacking)    
+  
+  * RandomForest (Bagging) 
+  
+  * Logistic Regression (Stacking)
+  
+  * Support Vector Machines (Stacking)
+  
+  * Stochastic Gradient Boosting (Boosting)
+
+========================================================================
+
+**Part2:  How to build model**
+
+========================================================================
+
+* The primary procedures for model fitting 
+
+  * step1 Normalization 
+  
+  * step2 Data Splitting 
+  
+  * step3 Parameters
+  
+  * step4 model fitting
+  
+  * step5 Performance of model
+  
+  * step6 predicting on test data 
+
+### load data 
+
+* 4-omics data 
+
+* Copy Number: copyNumber
+
+* gene Expression: geneExp
+
+* DNA methylation: methylation
+
+* Reverse Phase Protein Arrays: protein_RPPA
+
+```{r}
+phen <- fread("../../Result/phenotype/phenotype_cluster.csv")
+all_norm <- fread("../../Result/classification/all_top_feature_norm.csv")
+copyNumber_norm <- fread("../../Result/classification/copyNumber_top_feature_norm.csv")
+geneExp_norm <- fread("../../Result/classification/geneExp_top_feature_norm.csv")
+methylation_norm <- fread("../../Result/classification/methylation_top_feature_norm.csv")
+protein_RPPA_norm <- fread("../../Result/classification/protein_RPPA_top_feature_norm.csv")
+```
+
+
+### Data Splitting & build model based on different algorithms
+
+The alternative parameters for dataset and algorithm in this function 
+
+```{r}
+build_model_fun <- function(dataset=all_norm,
+                            algorithm="SVM"){
+  
+  # dataset=all_norm
+  # algorithm="SVM"
+  
+  set.seed(123)
+  mdat <- dataset %>% mutate(Cluster=factor(Cluster, levels = grp)) %>% 
+    column_to_rownames("V1")   
+  index <- createDataPartition(mdat$Cluster, p = 0.8, list = F)
+  trainData_all <- mdat[index, ] 
+  testData_all <- mdat[-index, ]
+  
+  trainData <- trainData_all %>% dplyr::select(colnames(phen)[2], colnames(mdat)[-c(1:11)]) 
+  testData <- testData_all %>% dplyr::select(colnames(phen)[2], colnames(mdat)[-c(1:11)])  
+  
+  # set parameters for model
+  myControl <- trainControl(method = "repeatedcv", 
+                           number = 10,
+                           repeats = 3,
+                           search = "grid",
+                           classProbs = TRUE,
+                           savePredictions = TRUE,
+                           verboseIter = FALSE)  
+  
+  metrics <- "Accuracy"
+  
+  if(algorithm == "all"){
+    
+    algorithmList  <- c("svmRadial", "rf", "gbm", "LogitBoost", "nb")
+    set.seed(123)
+    require(caretEnsemble)
+    fit <-  caretList(Cluster ~ ., data = trainData, 
+                      methodList = algorithmList , 
+                      trControl = myControl, 
+                      metric = metrics,
+                      verbose = FALSE) 
+  }else{
+    if(algorithm == "svmRadial"){        # Support Vector Machines with Radial Basis Function Kernel
+      myGrid <- expand.grid(sigma = seq(0.01, 0.1, 0.02),
+                            C = seq(0, 2, length = 10))
+      # new_algorithm <- getModelInfo()$lssvmLinear
+      # new_algorithm$fit <- function(x, y, wts, param, lev, last, classProbs, ...) {
+      #   kernlab::lssvm(x = as.matrix(x), y = y,
+      #                  tau = param$tau)}
+      new_algorithm <- "svmRadial"
+    }else if(algorithm == "rf"){         # random forest 
+      myGrid <- expand.grid(.mtry=c(sqrt(ncol(trainData)-1)))
+      new_algorithm <- "rf"   
+    }else if(algorithm == "LogitBoost"){ # Boosted Logistic Regression
+      myGrid <- expand.grid(nIter  = 500)
+      new_algorithm <- "LogitBoost"     
+    }else if(algorithm == "gbm"){        # Stochastic Gradient Boosting
+      myGrid <- expand.grid(interaction.depth = c(1, 5, 9),  
+                            n.trees = seq(1, 30, 4)*50,
+                            shrinkage = 0.1,
+                            n.minobsinnode = 20) 
+      new_algorithm <- "gbm" 
+    }else if(algorithm == "nb"){      # naive_bayes
+      myGrid <- expand.grid(fL=c(0,0.5,1.0), 
+                            usekernel = TRUE, 
+                            adjust=c(0,0.5,1.0)) 
+      new_algorithm <- "nb"     
+    }
+    set.seed(123)
+    fit <- train(Cluster ~ ., data = trainData, 
+                 method = new_algorithm, 
+                 trControl = myControl, 
+                 tuneGrid = myGrid,
+                 metric = metrics,
+                 verbose = FALSE) 
+  pred <- predict(fit, newdata=testData)
+  print(confusionMatrix(pred, testData$Cluster))
+  }
+  
+  res <- list(tData_all=testData_all, tData=testData, model=fit)
+  return(res)
+} 
+
+### ROC/AUC
+ROC_fun <- function(model_fit=all_model_svm){
+  
+  # model_fit=all_model_svm
+  
+  fit <- model_fit$model
+  tData <- model_fit$tData
+  
+  rocobj <- roc(tData$Cluster, predict(fit, newdata = tData, type = "prob")[, grp[1]])
+  auc <- round(auc(tData$Cluster, predict(fit, newdata = tData, type = "prob")[, grp[1]]),4)
+  plotroc <- tibble(tpr = rocobj$sensitivities,
+                     fpr = 1 - rocobj$specificities)
+  plroc <- ggplot(data = plotroc, aes(x=fpr, y=tpr))+
+              geom_path(color="black", size = 1)+
+              geom_abline(intercept = 0, slope = 1, color="grey", size = 1, linetype=2)+
+              labs(x = "False Positive Rate (1 - Specificity)",
+                   y = "True Positive Rate (Sensivity or Recall)")+
+              annotate("text",x = .75, y = .25,label=paste("AUC =", auc),
+                       size = 5, family="serif")+
+              coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))+
+              theme_bw()+
+              theme(panel.background = element_rect(fill = 'transparent'),
+                    axis.ticks.length = unit(0.4, "lines"), 
+                    axis.ticks = element_line(color='black'),
+                    axis.line = element_line(size=.5, colour = "black"),
+                    axis.title = element_text(colour='black', size=12,face = "bold"),
+                    axis.text = element_text(colour='black',size=10,face = "bold"),
+                    text = element_text(size=8, color="black", family="serif"))
+  return(plroc)  
+}
+
+### Evaluation
+Evaluation_fun <- function(model_fit=all_model_svm){
+  
+  # model_fit=all_model_svm
+  
+  fit <- model_fit$model
+  tData <- model_fit$tData
+  tData_all <- model_fit$tData_all
+  
+  pred <- predict(fit, newdata=tData)
+  
+  # test Data
+  testData_new <- data.frame(SampleID=rownames(tData),
+                             Predict_Cluster=pred) %>%
+    inner_join(tData_all %>% rownames_to_column("SampleID"),
+               by = "SampleID") %>%
+    dplyr::select(SampleID, Cluster, Predict_Cluster, OS, OS.Time) %>%
+    na.omit()
+
+  # Concordance index
+  Concordance_index_fun <- function(dataset=testData_new, 
+                                    group_name="Cluster"){
+    # dataset=testData_new
+    # group_name="Cluster"
+    
+    require(survcomp)
+    colnames(dataset)[which(colnames(dataset) == group_name)] <- "Group"
+    
+    ci_res <- with(dataset, concordance.index(x=Group, surv.time=OS.Time, surv.event=OS, 
+                      method="noether"))  
+    
+    res <- data.frame(Type=group_name,
+                       C_index=signif(ci_res$c.index, 3),
+                       pvalue=ci_res$p.value,
+                       se=signif(ci_res$se, 3),
+                       odd=with(ci_res, paste0("[", signif(lower, 3), ", ", signif(upper, 3), "]")))
+    
+    return(res)
+  }
+  Cluster_ci <- Concordance_index_fun(dataset=testData_new, group_name="Cluster")
+  Predict_Cluster_ci <- Concordance_index_fun(dataset=testData_new, group_name="Predict_Cluster")
+  ci_res <- rbind(Cluster_ci, Predict_Cluster_ci)
+  #DT::datatable(ci_res)
+
+  # Log-rank p-value of Cox-PH regression
+  Log_rank_fun <- function(dataset=testData_new, 
+                           group_name="Cluster"){
+    # dataset=testData_new
+    # group_name="Cluster"
+    
+    require(survival)
+    require(survminer)
+    colnames(dataset)[which(colnames(dataset) == group_name)] <- "Group"
+    cox <- coxph(Surv(OS.Time, OS) ~ Group, data = dataset) 
+    tmp <- summary(cox)
+    tmp.wald <- data.frame(t(tmp$waldtest)) %>%
+          setNames(c("Wald_test", "Wald_df", "Wald_pvlaue"))
+    tmp.lg <- data.frame(t(tmp$logtest)) %>%
+          setNames(c("lg_rank", "lg_rank_df", "lg_rank_pvlaue"))
+    tmp.total <- cbind(tmp.wald, tmp.lg) 
+      
+    pvalue <- paste(paste0("Log-Rank P=", signif(tmp.lg$lg_rank_pvlaue, 3)), 
+                    paste0("Cox P=", signif(tmp.wald$Wald_pvlaue, 3)), sep = "\n")
+    factors <- levels(dataset$Group)
+    surv_fit <- survfit(Surv(OS.Time, OS) ~ Group, data = dataset)
+    
+    sur_pl <- ggsurvplot(surv_fit,
+               data = dataset,  
+               surv.median.line = "hv",
+               add.all = TRUE,
+               palette = "aaas",
+               risk.table = TRUE, 
+               xlab = "Follow up time(Years)", 
+               legend = c(0.8, 0.2), 
+               legend.title = "",
+               legend.labs = c("all", factors), 
+               break.x.by = 2,
+               font.legend = c(10, "italic"),
+               ggtheme = theme_bw())
+    sur_pl$plot <- sur_pl$plot + 
+               annotate("text", x=3, y=0.2, label=pvalue)
+      
+    pl <- cowplot::plot_grid(sur_pl$plot, sur_pl$table, 
+                             ncol = 1, align = "hv", 
+                             rel_heights = c(2, 1))
+      
+    pval <- data.frame(Type=group_name,
+                             tmp.total)
+    res <- list(plot=pl, pvalue=pval)
+    return(res)
+  }
+  
+  Cluster_surv <- Log_rank_fun(dataset=testData_new, group_name="Cluster")
+  Predict_Cluster_surv <- Log_rank_fun(dataset=testData_new, group_name="Predict_Cluster")
+  surv_res <- rbind(Cluster_surv$pvalue, Predict_Cluster_surv$pvalue)
+  #DT::datatable(surv_res)
+
+  surv_pl <- cowplot::plot_grid(Cluster_surv$plot, Predict_Cluster_surv$plot,
+                     ncol = 2, align = "hv", labels = c("Actual", "Predict"))
+    
+  # Brier score
+  Brier_score_fun <- function(dataset=testData_new, 
+                              group_name="Cluster"){
+    # dataset=testData_new
+    # group_name="Cluster"
+    
+    require(survcomp)
+    colnames(dataset)[which(colnames(dataset) == group_name)] <- "Group"
+    
+    dat <- dataset %>% dplyr::select(c("Group", "OS", "OS.Time")) %>%
+      setNames(c("score", "event", "time"))
+    bsc <- sbrier.score2proba(data.tr=dat, data.ts=dat, method="cox")  
+    
+    res <- list(res_dat=dat, res_bsc=bsc)
+    return(res)
+  }
+  
+  Cluster_bsc <- Brier_score_fun(dataset=testData_new, group_name="Cluster")
+  Predict_Cluster_bsc <- Brier_score_fun(dataset=testData_new, group_name="Predict_Cluster")
+  
+  # if(!all(Cluster_bsc$res_dat$time == Predict_Cluster_bsc$res_dat$time)) {
+  #   stop("the two vector of BSCs must be computed for the same points in time!") 
+  # }
+  # ibsc.comp(bsc1=Cluster_bsc$res_bsc$bsc, 
+  #           bsc2=Predict_Cluster_bsc$res_bsc$bsc, time=Cluster_bsc$res_dat$time)  
+  
+  bsc_res <- data.frame(Type=c("Actual", "Predict"),
+                        Brier_score=c(Cluster_bsc$res_bsc$bsc.integrated,
+                                      Predict_Cluster_bsc$res_bsc$bsc.integrated))
+  
+  res <- list(ci_res=ci_res, surv_res=surv_res, bsc_res=bsc_res)
+  return(res)
+}
+```
+
+
+### 4 omics-data
+```{r}
+# model fitting 
+all_model_svm <- build_model_fun(dataset=all_norm, algorithm = "svmRadial")
+all_model_rf <- build_model_fun(dataset=all_norm, algorithm = "rf")
+all_model_lgb <- build_model_fun(dataset=all_norm, algorithm = "LogitBoost")
+all_model_gbm <- build_model_fun(dataset=all_norm, algorithm = "gbm")
+all_model_nb <- build_model_fun(dataset=all_norm, algorithm = "nb")
+
+# ROC/AUC 
+all_ROC_svm <- ROC_fun(model_fit = all_model_svm)
+all_ROC_rf <- ROC_fun(model_fit = all_model_svm)
+all_ROC_lgb <- ROC_fun(model_fit = all_model_svm)
+all_ROC_gbm <- ROC_fun(model_fit = all_model_svm)
+all_ROC_nb <- ROC_fun(model_fit = all_model_svm)
+cowplot::plot_grid(all_ROC_svm, all_ROC_rf, all_ROC_lgb, all_ROC_gbm, all_ROC_nb,
+                   ncol = 5, align = "h",
+                   labels = c("SVM", "rf", "lgb", "gbm", "Bayes"))
+
+# evaluation index 
+all_Evaluation_svm <- Evaluation_fun(model_fit = all_model_svm)
+all_Evaluation_svm
+all_Evaluation_rf <- Evaluation_fun(model_fit = all_model_rf)
+all_Evaluation_rf
+all_Evaluation_lgb <- Evaluation_fun(model_fit = all_model_lgb)
+all_Evaluation_lgb
+all_Evaluation_gbm <- Evaluation_fun(model_fit = all_model_gbm)
+all_Evaluation_gbm
+all_Evaluation_nb <- Evaluation_fun(model_fit = all_model_nb)
+all_Evaluation_nb
+
+# saving model 
+if(!dir.exists("../../Result/classification/model")){
+  dir.create("../../Result/classification/model", recursive = T)
+}
+save(all_model_svm, all_model_rf, all_model_lgb, all_model_gbm, all_model_nb,
+     all_ROC_svm, all_ROC_rf, all_ROC_lgb, all_ROC_gbm, all_ROC_nb,
+     all_Evaluation_svm, all_Evaluation_rf, all_Evaluation_lgb, all_Evaluation_gbm, all_Evaluation_nb,
+     file = "../../Result/classification/model/all_model.RData")
+```
+
+
+### copyNumber
+```{r}
+# model fitting 
+copyNumber_model_svm <- build_model_fun(dataset=copyNumber_norm, algorithm = "svmRadial")
+copyNumber_model_rf <- build_model_fun(dataset=copyNumber_norm, algorithm = "rf")
+copyNumber_model_lgb <- build_model_fun(dataset=copyNumber_norm, algorithm = "LogitBoost")
+copyNumber_model_gbm <- build_model_fun(dataset=copyNumber_norm, algorithm = "gbm")
+copyNumber_model_nb <- build_model_fun(dataset=copyNumber_norm, algorithm = "nb")
+
+# ROC/AUC 
+copyNumber_ROC_svm <- ROC_fun(model_fit = copyNumber_model_svm)
+copyNumber_ROC_rf <- ROC_fun(model_fit = copyNumber_model_svm)
+copyNumber_ROC_lgb <- ROC_fun(model_fit = copyNumber_model_svm)
+copyNumber_ROC_gbm <- ROC_fun(model_fit = copyNumber_model_svm)
+copyNumber_ROC_nb <- ROC_fun(model_fit = copyNumber_model_svm)
+cowplot::plot_grid(copyNumber_ROC_svm, copyNumber_ROC_rf, copyNumber_ROC_lgb, copyNumber_ROC_gbm, copyNumber_ROC_nb,
+                   ncol = 5, align = "h",
+                   labels = c("SVM", "rf", "lgb", "gbm", "Bayes"))
+
+# evaluation index 
+copyNumber_Evaluation_svm <- Evaluation_fun(model_fit = copyNumber_model_svm)
+copyNumber_Evaluation_svm
+copyNumber_Evaluation_rf <- Evaluation_fun(model_fit = copyNumber_model_rf)
+copyNumber_Evaluation_rf
+copyNumber_Evaluation_lgb <- Evaluation_fun(model_fit = copyNumber_model_lgb)
+copyNumber_Evaluation_lgb
+copyNumber_Evaluation_gbm <- Evaluation_fun(model_fit = copyNumber_model_gbm)
+copyNumber_Evaluation_gbm
+copyNumber_Evaluation_nb <- Evaluation_fun(model_fit = copyNumber_model_nb)
+copyNumber_Evaluation_nb
+
+# saving model 
+if(!dir.exists("../../Result/classification/model")){
+  dir.create("../../Result/classification/model", recursive = T)
+}
+save(copyNumber_model_svm, copyNumber_model_rf, copyNumber_model_lgb, copyNumber_model_gbm, copyNumber_model_nb,
+     copyNumber_ROC_svm, copyNumber_ROC_rf, copyNumber_ROC_lgb, copyNumber_ROC_gbm, copyNumber_ROC_nb,
+     copyNumber_Evaluation_svm, copyNumber_Evaluation_rf, copyNumber_Evaluation_lgb, copyNumber_Evaluation_gbm, copyNumber_Evaluation_nb,
+     file = "../../Result/classification/model/copyNumber_model.RData")
+```
+
+
+### geneExp
+```{r}
+# model fitting 
+geneExp_model_svm <- build_model_fun(dataset=geneExp_norm, algorithm = "svmRadial")
+geneExp_model_rf <- build_model_fun(dataset=geneExp_norm, algorithm = "rf")
+geneExp_model_lgb <- build_model_fun(dataset=geneExp_norm, algorithm = "LogitBoost")
+geneExp_model_gbm <- build_model_fun(dataset=geneExp_norm, algorithm = "gbm")
+geneExp_model_nb <- build_model_fun(dataset=geneExp_norm, algorithm = "nb")
+
+# ROC/AUC 
+geneExp_ROC_svm <- ROC_fun(model_fit = geneExp_model_svm)
+geneExp_ROC_rf <- ROC_fun(model_fit = geneExp_model_svm)
+geneExp_ROC_lgb <- ROC_fun(model_fit = geneExp_model_svm)
+geneExp_ROC_gbm <- ROC_fun(model_fit = geneExp_model_svm)
+geneExp_ROC_nb <- ROC_fun(model_fit = geneExp_model_svm)
+cowplot::plot_grid(geneExp_ROC_svm, geneExp_ROC_rf, geneExp_ROC_lgb, geneExp_ROC_gbm, geneExp_ROC_nb,
+                   ncol = 5, align = "h",
+                   labels = c("SVM", "rf", "lgb", "gbm", "Bayes"))
+
+# evaluation index 
+geneExp_Evaluation_svm <- Evaluation_fun(model_fit = geneExp_model_svm)
+geneExp_Evaluation_svm
+geneExp_Evaluation_rf <- Evaluation_fun(model_fit = geneExp_model_rf)
+geneExp_Evaluation_rf
+geneExp_Evaluation_lgb <- Evaluation_fun(model_fit = geneExp_model_lgb)
+geneExp_Evaluation_lgb
+geneExp_Evaluation_gbm <- Evaluation_fun(model_fit = geneExp_model_gbm)
+geneExp_Evaluation_gbm
+geneExp_Evaluation_nb <- Evaluation_fun(model_fit = geneExp_model_nb)
+geneExp_Evaluation_nb
+
+# saving model 
+if(!dir.exists("../../Result/classification/model")){
+  dir.create("../../Result/classification/model", recursive = T)
+}
+save(geneExp_model_svm, geneExp_model_rf, geneExp_model_lgb, geneExp_model_gbm, geneExp_model_nb,
+     geneExp_ROC_svm, geneExp_ROC_rf, geneExp_ROC_lgb, geneExp_ROC_gbm, geneExp_ROC_nb,
+     geneExp_Evaluation_svm, geneExp_Evaluation_rf, geneExp_Evaluation_lgb, geneExp_Evaluation_gbm, geneExp_Evaluation_nb,
+     file = "../../Result/classification/model/geneExp_model.RData")
+```
+
+
+### methylation
+```{r}
+# model fitting 
+methylation_model_svm <- build_model_fun(dataset=methylation_norm, algorithm = "svmRadial")
+methylation_model_rf <- build_model_fun(dataset=methylation_norm, algorithm = "rf")
+methylation_model_lgb <- build_model_fun(dataset=methylation_norm, algorithm = "LogitBoost")
+methylation_model_gbm <- build_model_fun(dataset=methylation_norm, algorithm = "gbm")
+methylation_model_nb <- build_model_fun(dataset=methylation_norm, algorithm = "nb")
+
+# ROC/AUC 
+methylation_ROC_svm <- ROC_fun(model_fit = methylation_model_svm)
+methylation_ROC_rf <- ROC_fun(model_fit = methylation_model_svm)
+methylation_ROC_lgb <- ROC_fun(model_fit = methylation_model_svm)
+methylation_ROC_gbm <- ROC_fun(model_fit = methylation_model_svm)
+methylation_ROC_nb <- ROC_fun(model_fit = methylation_model_svm)
+cowplot::plot_grid(methylation_ROC_svm, methylation_ROC_rf, methylation_ROC_lgb, methylation_ROC_gbm, methylation_ROC_nb,
+                   ncol = 5, align = "h",
+                   labels = c("SVM", "rf", "lgb", "gbm", "Bayes"))
+
+# evaluation index 
+methylation_Evaluation_svm <- Evaluation_fun(model_fit = methylation_model_svm)
+methylation_Evaluation_svm
+methylation_Evaluation_rf <- Evaluation_fun(model_fit = methylation_model_rf)
+methylation_Evaluation_rf
+methylation_Evaluation_lgb <- Evaluation_fun(model_fit = methylation_model_lgb)
+methylation_Evaluation_lgb
+methylation_Evaluation_gbm <- Evaluation_fun(model_fit = methylation_model_gbm)
+methylation_Evaluation_gbm
+methylation_Evaluation_nb <- Evaluation_fun(model_fit = methylation_model_nb)
+methylation_Evaluation_nb
+
+# saving model 
+if(!dir.exists("../../Result/classification/model")){
+  dir.create("../../Result/classification/model", recursive = T)
+}
+save(methylation_model_svm, methylation_model_rf, methylation_model_lgb, methylation_model_gbm, methylation_model_nb,
+     methylation_ROC_svm, methylation_ROC_rf, methylation_ROC_lgb, methylation_ROC_gbm, methylation_ROC_nb,
+     methylation_Evaluation_svm, methylation_Evaluation_rf, methylation_Evaluation_lgb, methylation_Evaluation_gbm, methylation_Evaluation_nb,
+     file = "../../Result/classification/model/methylation_model.RData")
+```
+
+
+### protein_RPPA
+```{r}
+# model fitting 
+protein_RPPA_model_svm <- build_model_fun(dataset=protein_RPPA_norm, algorithm = "svmRadial")
+protein_RPPA_model_rf <- build_model_fun(dataset=protein_RPPA_norm, algorithm = "rf")
+protein_RPPA_model_lgb <- build_model_fun(dataset=protein_RPPA_norm, algorithm = "LogitBoost")
+protein_RPPA_model_gbm <- build_model_fun(dataset=protein_RPPA_norm, algorithm = "gbm")
+protein_RPPA_model_nb <- build_model_fun(dataset=protein_RPPA_norm, algorithm = "nb")
+
+# ROC/AUC 
+protein_RPPA_ROC_svm <- ROC_fun(model_fit = protein_RPPA_model_svm)
+protein_RPPA_ROC_rf <- ROC_fun(model_fit = protein_RPPA_model_svm)
+protein_RPPA_ROC_lgb <- ROC_fun(model_fit = protein_RPPA_model_svm)
+protein_RPPA_ROC_gbm <- ROC_fun(model_fit = protein_RPPA_model_svm)
+protein_RPPA_ROC_nb <- ROC_fun(model_fit = protein_RPPA_model_svm)
+cowplot::plot_grid(protein_RPPA_ROC_svm, protein_RPPA_ROC_rf, protein_RPPA_ROC_lgb, protein_RPPA_ROC_gbm, protein_RPPA_ROC_nb,
+                   ncol = 5, align = "h",
+                   labels = c("SVM", "rf", "lgb", "gbm", "Bayes"))
+
+# evaluation index 
+protein_RPPA_Evaluation_svm <- Evaluation_fun(model_fit = protein_RPPA_model_svm)
+protein_RPPA_Evaluation_svm
+protein_RPPA_Evaluation_rf <- Evaluation_fun(model_fit = protein_RPPA_model_rf)
+protein_RPPA_Evaluation_rf
+protein_RPPA_Evaluation_lgb <- Evaluation_fun(model_fit = protein_RPPA_model_lgb)
+protein_RPPA_Evaluation_lgb
+protein_RPPA_Evaluation_gbm <- Evaluation_fun(model_fit = protein_RPPA_model_gbm)
+protein_RPPA_Evaluation_gbm
+protein_RPPA_Evaluation_nb <- Evaluation_fun(model_fit = protein_RPPA_model_nb)
+protein_RPPA_Evaluation_nb
+
+# saving model 
+if(!dir.exists("../../Result/classification/model")){
+  dir.create("../../Result/classification/model", recursive = T)
+}
+save(protein_RPPA_model_svm, protein_RPPA_model_rf, protein_RPPA_model_lgb, protein_RPPA_model_gbm, protein_RPPA_model_nb,
+     protein_RPPA_ROC_svm, protein_RPPA_ROC_rf, protein_RPPA_ROC_lgb, protein_RPPA_ROC_gbm, protein_RPPA_ROC_nb,
+     protein_RPPA_Evaluation_svm, protein_RPPA_Evaluation_rf, protein_RPPA_Evaluation_lgb, protein_RPPA_Evaluation_gbm, protein_RPPA_Evaluation_nb,
+     file = "../../Result/classification/model/protein_RPPA_model.RData")
+```
+
+
+### version
+```{r}
+sessionInfo()
+```
+
+
+### Reference 
+
+
+1. [Support Vector machines](https://topepo.github.io/caret/train-models-by-tag.html#support-vector-machines)
+
+
+2. [model training and tuning](https://topepo.github.io/caret/model-training-and-tuning.html#basic-parameter-tuning)
+
+3. [the solution for *tau=0.0625 Error in if \(truegain\[k\] < tol\) break*](https://stackoverflow.com/questions/46192553/least-square-support-vector-machine-in-caret-fail)
+
+4. [Better Naive Bayes: 12 Tips To Get The Most From The Naive Bayes Algorithm](https://machinelearningmastery.com/better-naive-bayes/)
+
+5. [SVM Model: Support Vector Machine Essentials](http://www.sthda.com/english/articles/36-classification-methods-essentials/144-svm-model-support-vector-machine-essentials/)
+
+

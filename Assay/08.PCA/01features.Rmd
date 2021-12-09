@@ -1,0 +1,92 @@
+---
+title: "Principal Component Analysis: get the top 100 PCs"
+date: "Created: 2021-01-23; updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(data.table)
+library(factoextra)
+
+rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+```
+
+## What is PCA
+
+Principal component analysis is an unsupervised method to find the greatest sources of variation from the multiple dimensions data. It used the partial least squares to perform the covariance decomposition.
+
+
+### load data
+```{r}
+phen <- fread("../../Result/phenotype/common_survival_data.tsv")
+all_prf <- fread("../../Result/profile/All_filter_merge_profile.tsv")
+```
+
+### get the principal components by PCA
+
+* Row: samples
+
+* Column: omics-data features
+
+Before performing PCA, we need scale the dataset, and use the built-in prcomp function implemented singular value decomposition algorithm.
+
+```{r}
+get_pc_scores <- function(dataset = all_prf){
+  
+  # dataset = all_prf
+  
+  sid <- intersect(phen$Barcode, dataset$SampleID) 
+  prof <- dataset %>% filter(SampleID%in%sid) %>%
+    column_to_rownames("SampleID")
+  
+  fit <- prcomp(prof, scale. = T, center = T)
+  
+  # rotation <- fit$rotation
+  scores <- fit$x
+  
+  return(scores)
+}
+```
+
+
+### Run
+```{r}
+pc_scores <- get_pc_scores(dataset = all_prf)
+
+pc_scores_top100 <- pc_scores %>% data.frame() %>% 
+  dplyr::select(c(1:100)) %>% 
+  rownames_to_column("SampleID")
+
+write.csv(data.frame(pc_scores) %>% rownames_to_column("SampleID"),
+          "../../Result/profile/PCA_all_features.csv", row.names = F)
+
+write.csv(pc_scores_top100,
+          "../../Result/profile/PCA_top100_features.csv", row.names = F)
+```
+
+
+### version
+```{r}
+sessionInfo()
+```
+
+
+### Reference 
+
+1. [Articles - Principal Component Methods in R: Practical Guide](http://www.sthda.com/english/articles/31-principal-component-methods-in-r-practical-guide/118-principal-component-analysis-in-r-prcomp-vs-princomp/)
+
+2. [Principal Component Analysis in R](https://www.r-bloggers.com/2017/01/principal-component-analysis-in-r/)
+
+
+

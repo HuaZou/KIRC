@@ -1,0 +1,108 @@
+---
+title: "survival analysis: the autoencoder features related to survial status"
+date: "Created: 2021-01-18; updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(survival)
+library(survminer)
+library(data.table)
+
+rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+```
+
+
+### load data
+```{r}
+phen <- fread("../../Result/phenotype/common_survival_data.tsv")
+feature <- fread("../../Result/profile/Autoencoder_top100_newfeatures.csv")
+```
+
+
+### Function
+
+* get the log-rank p value per feature 
+```{r}
+get_coxPh <- function(profile=feature, 
+                      metadata=phen){
+  
+  # profile=feature
+  # metadata=phen
+  
+  
+  mdat <- inner_join(metadata %>% dplyr::select(Barcode, OS.Time, OS),
+                     profile,
+                     by = c("Barcode"="SampleID")) %>%
+          column_to_rownames("Barcode")
+  
+  datphe <- mdat %>% dplyr::select(OS.Time, OS) 
+  datprf <- mdat %>% dplyr::select(-c("OS.Time", "OS")) 
+  
+  res <- apply(datprf, 2, function(x, phe){ 
+    dat <- cbind(phe, Value=x)
+    cox <- coxph(Surv(OS.Time, OS) ~ Value, data = dat)
+    tmp <- summary(cox)
+    wald <- as.numeric(tmp$waldtest)
+    lg <- as.numeric(tmp$logtest)
+    res <- cbind(wald, lg)     
+    
+    
+    },datphe) %>% t() %>% data.frame() %>%
+    setNames(c("Wald_test", "Wald_df", "Wald_pvlaue", 
+               "lg_rank", "lg_rank_df", "lg_rank_pvlaue")) %>%
+    rownames_to_column("FeatureID") %>%
+    mutate(FDR=p.adjust(lg_rank_pvlaue, method = "BH")) %>%
+    arrange(FDR) %>%
+    mutate(Status=ifelse(FDR < 0.01, "Remain", "Discard"))
+  
+  return(res)
+}
+```
+
+
+### calculate
+```{r}
+cox_ph <- get_coxPh(profile = feature, metadata = phen)
+
+head(cox_ph)
+
+if(!dir.exists("../../Result/feature")){
+  dir.create("../../Result/feature")
+}
+
+write.csv(cox_ph, "../../Result/feature/survival_AEfeatures.csv", row.names = F)
+```
+
+
+### get the remain featureID and profile
+```{r}
+cox_ph_remain <- cox_ph %>% filter(Status == "Remain")
+feature_trim <- feature %>% dplyr::select(SampleID, as.character(cox_ph_remain$FeatureID))
+write.csv(feature_trim, "../../Result/feature/Autoencoder_Remain_features.csv", row.names = F)
+```
+
+
+### version
+```{r}
+sessionInfo()
+```
+
+
+### Reference 
+
+1. [解决生存分析和临床参数相关分析](https://www.jianshu.com/p/9cc986dcf285)
+
+2. [怎么处理生存时间为0的样本](https://www.biostars.org/p/153013/)
+

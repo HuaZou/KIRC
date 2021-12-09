@@ -1,0 +1,283 @@
+---
+title: "Classification: Features Scaling"
+date: "Created: 2021-01-20; updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(data.table)
+
+rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+
+grp <- c("S1", "S2")
+grp.col <- c("#6C326C", "#77A2D1")
+```
+
+### Introduction
+
+To predict on TCGA 4 omics held-out test data, we built an SVM classifier from a combination of top 100 CopyNumber, 100 mRNAs, 50 methylation and 30 RPPAs, selected by ANOVA test.
+
+* Copy Number: copyNumber
+
+* gene Expression: geneExp
+
+* DNA methylation: methylation
+
+* Reverse Phase Protein Arrays: protein_RPPA
+
+### load data 
+```{r}
+phen <- fread("../../Result/phenotype/phenotype_cluster.csv")
+
+copyNumber <- fread("../../Result/profile/copyNumber_filter.tsv")
+geneExp <- fread("../../Result/profile/geneExp_filter.tsv")
+methylation <- fread("../../Result/profile/methylation_filter.tsv")
+protein_RPPA <- fread("../../Result/profile/protein_RPPA_filter.tsv")
+
+copyNumber_anova <- fread("../../Result/ANOVA/copyNumber_anvoa.csv")
+geneExp_anova <- fread("../../Result/ANOVA/geneExp_anvoa.csv")
+methylation_anova <- fread("../../Result/ANOVA/methylation_anvoa.csv")
+protein_RPPA_anova <- fread("../../Result/ANOVA/protein_RPPA_anvoa.csv")
+```
+
+
+### get the top N features for each layer omic-data 
+```{r}
+get_top_features <- function(dataset=copyNumber,
+                            anova=copyNumber_anova,
+                            number=100,
+                            tag="copyNumber"){
+  # dataset=copyNumber
+  # anova=copyNumber_anova
+  # number=100
+  # tag="copyNumber"
+  
+  feature_top <- anova %>%
+    slice(c(1:number)) 
+  
+  prof <- dataset %>% filter(V1%in%as.character(dataset$V1)) %>%
+    mutate(V1=gsub("-", ".", V1)) %>%
+    filter(V1%in%as.character(feature_top$Feature)) %>%
+    mutate(V1=paste(V1, tag, sep = "_")) 
+  
+  res <- prof %>% column_to_rownames("V1")
+  return(res)
+}
+
+copyNumber_top <- get_top_features(dataset=copyNumber, anova=copyNumber_anova, number=100, tag="copyNumber")
+geneExp_top <- get_top_features(dataset=geneExp, anova=geneExp_anova, number=100, tag="geneExp")
+methylation_top <- get_top_features(dataset=methylation, anova=methylation_anova, number=50, tag="methylation")
+protein_RPPA_top <- get_top_features(dataset=protein_RPPA, anova=protein_RPPA_anova, number=30, tag="protein_RPPA")
+
+
+# cbind 4-omics data 
+all_top_feature <- plyr::join_all(list(copyNumber_top %>% t() %>% 
+                                         data.frame() %>% rownames_to_column("SampleID"),
+                                       geneExp_top %>% t() %>% 
+                                         data.frame() %>% rownames_to_column("SampleID"),
+                                       methylation_top %>% t() %>% 
+                                         data.frame() %>% rownames_to_column("SampleID"),
+                                       protein_RPPA_top %>% t() %>% 
+                                         data.frame() %>% rownames_to_column("SampleID")),
+                                  by = "SampleID", type = "left", match = "first") %>%
+                    column_to_rownames("SampleID")
+
+# output 
+if(!dir.exists("../../Result/classification/")){
+  dir.create("../../Result/classification/", recursive = T)
+}
+write.csv(copyNumber_top, "../../Result/classification/copyNumber_top_feature.csv", row.names = T)
+write.csv(geneExp_top, "../../Result/classification/geneExp_top_feature.csv", row.names = T)
+write.csv(methylation_top, "../../Result/classification/methylation_top_feature.csv", row.names = T)
+write.csv(protein_RPPA_top, "../../Result/classification/protein_RPPA_top_feature.csv", row.names = T)
+write.csv(all_top_feature, "../../Result/classification/all_top_feature.csv", row.names = T)
+```
+
+
+### Feature Scaling Function
+```{r}
+# step1: Median scale normalization for train data and the new test data on 4-omics data
+MDA_fun <- function(features){
+  # x for features X = (x1, x2, ..., xn)
+  value <- as.numeric(features)
+  d_mad <- mad(value)
+  x_scale <- (value - median(value))/d_mad
+  
+  return(x_scale)  
+}
+
+# step2.1: Robust scale normalization for train data and the confirmation data on mRNA and DNA methylation data 
+Robust_fun <- function(features){
+  # x for features X = (x1, x2, ..., xn)
+  value <- as.numeric(features)
+  q_value <- as.numeric(quantile(value))
+  remain_value <- value[value > q_value[2] & value < q_value[4]]
+  
+  mean_value <- mean(remain_value)
+  sd_value <- sd(remain_value)
+  
+  x_scale <- (value - mean_value)/sd_value
+  
+  return(x_scale)  
+}
+
+# step2.2: Unit scale normalization for CopyNumber and Reverse Phase Protein Arrays 
+Unit_fun <- function(samples){
+  # v for samples v = (v1, v2, ..., vn)
+  value <- as.numeric(samples)
+  x_scale <- value / sqrt(sum(value^2))
+  
+  return(x_scale)  
+}
+
+# step2.3: z-scale normalization  
+Zscore_fun <- function(features){
+  # x for features X = (x1, x2, ..., xn)
+  value <- as.numeric(features)
+  mean_value <- mean(value)
+  sd_value <- sd(value)
+  
+  x_scale <- (value - mean_value)/sd_value
+  
+  return(x_scale) 
+}
+
+# step2.4: Min-Max normalization  
+Min_Max_fun <- function(features){
+  # x for features X = (x1, x2, ..., xn)
+  value <- as.numeric(features)
+  min_value <- min(value)
+  max_value <- max(value)
+  
+  x_scale <- (value - min_value)/(max_value - min_value)
+  
+  return(x_scale) 
+}
+```
+
+
+### Feature scaling
+
+
+* 4-omics data 
+
+* Copy Number: copyNumber
+
+* gene Expression: geneExp
+
+* DNA methylation: methylation
+
+* Reverse Phase Protein Arrays: protein_RPPA
+
+```{r}
+get_scaled_prf <- function(dataset=all_top_feature,
+                           type="all"){
+  
+  # dataset=copyNumber_top
+  # type="copyNumber"
+  
+  if(type == "all"){
+    
+    dat <- dataset %>% t() %>% data.frame() 
+    
+    # MDA 
+    dat_s1_MDA <- apply(dat, 1, MDA_fun)
+    rownames(dat_s1_MDA) <- colnames(dat)
+    
+    # robust & unit
+    dat_s2_tmp <- dat_s1_MDA %>% t() %>%
+      data.frame() %>% 
+      rownames_to_column("Feature")
+    dat_s2_tmp_mRNA_meth <- dat_s2_tmp %>% 
+      filter(Feature%in%grep("geneExp|methylation", Feature, value = T)) %>%
+      column_to_rownames("Feature")
+    dat_s2_tmp_CNV_RPPA <- dat_s2_tmp %>% 
+      filter(Feature%in%grep("copyNumber|protein_RPPA", Feature, value = T)) %>%
+      column_to_rownames("Feature")
+    dat_s2_tmp_mRNA_meth_norm <- apply(dat_s2_tmp_mRNA_meth, 1, Robust_fun)
+    rownames(dat_s2_tmp_mRNA_meth_norm) <- colnames(dat_s2_tmp_mRNA_meth)
+    dat_s2_tmp_CNV_RPPA_norm <- apply(dat_s2_tmp_CNV_RPPA, 2, Unit_fun)
+    rownames(dat_s2_tmp_CNV_RPPA_norm) <- rownames(dat_s2_tmp_CNV_RPPA)
+    
+    dat_s2_norm <- inner_join(data.frame(dat_s2_tmp_mRNA_meth_norm) %>% rownames_to_column("SampleID"),
+                              data.frame(dat_s2_tmp_CNV_RPPA_norm) %>% t() %>% 
+                                data.frame() %>% rownames_to_column("SampleID"),
+                              by = "SampleID")
+    # cbind phenotype and normalized data 
+    res <- inner_join(phen, dat_s2_norm, by = c("Barcode" = "SampleID")) %>%
+      mutate(Cluster=factor(Cluster, levels = grp)) %>%
+      column_to_rownames("Barcode")
+    
+  }else if(any(c("copyNumber", "geneExp", "methylation", "protein_RPPA")%in%type)){
+    # MDA 
+    dat_s1_MDA <- apply(dataset, 1, MDA_fun)
+    rownames(dat_s1_MDA) <- colnames(dataset) 
+    
+    if(any(c("geneExp", "methylation")%in%type)){
+      # Robust scale normalization for mRNA and DNA methylation
+      dat_s2_norm <- apply(dat_s1_MDA, 1, Robust_fun)
+    }else if(any(c("copyNumber", "protein_RPPA")%in%type)){
+      # Unit scale normalization for CopyNumber and protein RPPA
+      dat_s2_norm <- apply(dat_s1_MDA, 1, Unit_fun)
+    }
+    
+    rownames(dat_s2_norm) <- colnames(dat_s1_MDA)  
+    res <- inner_join(phen, 
+                        data.frame(t(dat_s2_norm)) %>% 
+                          rownames_to_column("SampleID"), 
+                        by = c("Barcode" = "SampleID")) %>%
+        mutate(Cluster=factor(Cluster, levels = grp)) %>%
+        column_to_rownames("Barcode")     
+  }
+  
+  return(res)
+}
+
+
+copyNumber_top_norm <- get_scaled_prf(dataset=copyNumber_top, type="copyNumber")
+geneExp_top_norm <- get_scaled_prf(dataset=geneExp_top, type="geneExp")
+methylation_top_norm <- get_scaled_prf(dataset=methylation_top, type="methylation")
+protein_RPPA_top_norm <- get_scaled_prf(dataset=protein_RPPA_top, type="protein_RPPA")
+
+
+# cbind 4-omics data 
+all_top_feature_norm <- get_scaled_prf(dataset=all_top_feature, type="all")
+
+# output 
+if(!dir.exists("../../Result/classification/")){
+  dir.create("../../Result/classification/", recursive = T)
+}
+write.csv(copyNumber_top_norm, "../../Result/classification/copyNumber_top_feature_norm.csv", row.names = T)
+write.csv(geneExp_top_norm, "../../Result/classification/geneExp_top_feature_norm.csv", row.names = T)
+write.csv(methylation_top_norm, "../../Result/classification/methylation_top_feature_norm.csv", row.names = T)
+write.csv(protein_RPPA_top_norm, "../../Result/classification/protein_RPPA_top_feature_norm.csv", row.names = T)
+write.csv(all_top_feature_norm, "../../Result/classification/all_top_feature_norm.csv", row.names = T)
+```
+
+
+### version
+```{r}
+sessionInfo()
+```
+
+
+### Reference 
+
+1. [Data Normalization With R](https://medium.com/swlh/data-normalisation-with-r-6ef1d1947970)
+
+2. [Median Absolute Deviation](https://www.rdocumentation.org/packages/stats/versions/3.6.2/topics/mad)
+
+
+3. [为什么要做特征归一化/标准化](https://www.cnblogs.com/shine-lee/p/11779514.html)
+
+

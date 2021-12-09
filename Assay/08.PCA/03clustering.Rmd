@@ -1,0 +1,412 @@
+---
+title: "K-means clustering analysis based on PCA"
+date: "Created: 2021-01-23; updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(data.table)
+library(fpc)
+library(factoextra)
+library(cluster)
+library(survival)
+library(survminer)
+library(cowplot)
+
+rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+
+grp <- c("S1", "S2")
+grp.col <- c("#6C326C", "#77A2D1")
+```
+
+### What is K-means clustering
+
+> K-means clustering is a technique in which we place each observation in a dataset into one of K clusters.
+>
+> The end goal is to have K clusters in which the observations within each cluster are quite similar to each other while the observation in different clusters are quite different from each other.
+>
+> In practice, we use the following steps to perform K-means clustering:
+>
+>1. **Choose a value for K**
+>
+>2. **Randomly assign each observation to an initial cluster, from 1 to K**
+>
+>3. **Perform the following procedure until the cluster assignments stop changing** 
+>
+>  * For each of the K clusters, compute the cluster centroid. This is simply the vector of the p feature means for the observations in the kth cluster.
+>
+>  * Assign each observation to the cluster whose centroid is closest. Here, closest is defined using Euclidean distance.
+
+### load data
+```{r}
+phen <- fread("../../Result/phenotype/common_survival_data.tsv")
+feature <- fread("../../Result/feature/PCA_Remain_features.csv") 
+feature_cln <- feature %>% column_to_rownames("SampleID")
+```
+
+
+### Silhouette index and Calinski Harabasz
+
+we used Silhouette index and Calinski Harabasz criterion to identify the optimal Number of clusters, and found that K=2 was the optimum with the best scores for both metrics.
+```{r}
+num <- 10
+silhouette_index_fit <- pamk(feature_cln, krange=1:num, criterion="asw") 
+Calinski_Harabasz_fit <- pamk(feature_cln, krange=1:num, criterion="ch")
+
+index_df <- data.frame(Cluster=c(1:num),
+                       silhouette_index=silhouette_index_fit$crit,
+                       Calinski_Harabasz=Calinski_Harabasz_fit$crit) %>%
+  filter(Cluster != 1) 
+DT::datatable(index_df)
+```
+
+* plotting 
+```{r, fig.width=8, fig.height=4}
+scaleFactor <- max(index_df$silhouette_index) / max(index_df$Calinski_Harabasz)
+k_index_plot <- ggplot(data = index_df, aes(x=Cluster))+
+  geom_point(aes(y=silhouette_index), color = "darkred")+
+  geom_point(aes(y=Calinski_Harabasz * scaleFactor), color = "steelblue")+
+  geom_line(aes(y=silhouette_index), color = "darkred", size=1)+
+  geom_line(aes(y=Calinski_Harabasz * scaleFactor), color = "steelblue", linetype="twodash", size=1)+
+  scale_y_continuous(name="Silhouette score", breaks = seq(0, 0.4, 0.05),
+                     sec.axis=sec_axis(~./scaleFactor, 
+                                       breaks=seq(100, 200, 10),
+                                       name="Calinski Harabasz score"))+
+  
+  scale_x_continuous(name="Input cluster number", breaks = seq(2, 10, 1))+
+  theme_bw()+
+  theme(axis.title = element_text(face = "bold",color = "black",size = 12),
+        axis.text = element_text(color = "black",size = 10),
+        text = element_text(size = 8, color = "black", family="serif")) 
+
+k_index_plot 
+
+if(!dir.exists("../../Result/figure/cluster/")){
+  dir.create("../../Result/figure/cluster/", recursive = T)
+}
+ggsave("../../Result/figure/cluster/best_K_cluster_PCA.pdf", k_index_plot, width = 8, height = 5, dpi = 600)
+```
+
+
+### Scatterplot and survival analysis per K clusters
+
+* scatterplot 
+
+* survival analysis
+```{r}
+get_cluster <- function(knum=num){
+  # knum=num
+  cluster_plot <- list()
+  for (i in 2:knum) {
+    fit <- pam(feature_cln, k=i)
+    #fit2 <- pamk(feature_cln, krange=i, criterion="asw")
+    
+    # data.frame(fit$pamobject$clustering) -> cluster1
+    # data.frame(fit2$clustering) -> cluster2
+    # cluster_res <- inner_join(cluster1 %>% setNames("Cluster_pamk") %>% rownames_to_column("SampleID"), 
+    #                           cluster2 %>% setNames("Cluster_pam") %>% rownames_to_column("SampleID"), 
+    #                           by ="SampleID") %>% 
+    #                mutate(Status = ifelse(Cluster_pamk == Cluster_pam, "Match", "Unmatch"))
+    # table(cluster_res$Status)
+    
+    
+    data.frame(fit$clustering) %>% rownames_to_column("SampleID") %>%
+      setNames(c("SampleID", "Cluster")) %>% 
+      mutate(Cluster=paste0("S", Cluster),
+             Cluster=factor(Cluster)) -> temp_cluster
+    
+    mdat_survival <- temp_cluster %>% inner_join(phen, by = c("SampleID"="Barcode"))
+    mdat_feature <- temp_cluster %>% inner_join(feature_cln %>% rownames_to_column("SampleID"),
+                                                by = "SampleID")
+    
+    # scatterplot 
+    scatter_pl <- fviz_cluster(fit, data = feature_cln, 
+                               geom = "point", ellipse = FALSE,
+                               shape = 19, pointsize = 3,
+                               main = paste0("K=",i), 
+                               ggtheme=theme_bw())+
+      theme(plot.title = element_text(face = "bold",color = "black",size = 14, hjust = .5), 
+            axis.title = element_text(face = "bold",color = "black",size = 12),
+            axis.text = element_text(color = "black",size = 10),
+            text = element_text(size = 8, color = "black", family="serif"),
+            panel.grid = element_blank(),
+            legend.position = c(0.1, 0.1),
+            legend.justification = c(0, 0),
+            legend.key.height = unit(0.6, "cm"),
+            legend.text = element_text(face = "bold", color = "black", size = 12)) 
+    
+    
+    # survival analysis 
+    dat_sur <- mdat_survival %>% column_to_rownames("SampleID") %>%
+      dplyr::select(Cluster, OS.Time, OS)
+    cox <- coxph(Surv(OS.Time, OS) ~ Cluster, data = dat_sur)
+    tmp <- summary(cox)
+    tmp.wald <- data.frame(t(tmp$waldtest)) %>%
+        setNames(c("Wald_test", "Wald_df", "Wald_pvlaue"))
+    tmp.lg <- data.frame(t(tmp$logtest)) %>%
+        setNames(c("lg_rank", "lg_rank_df", "lg_rank_pvlaue"))
+    tmp.total <- cbind(tmp.wald, tmp.lg) 
+    
+    pvalue <- paste(paste0("Log-Rank P=", signif(tmp.lg$lg_rank_pvlaue, 3)), 
+                  paste0("Cox P=", signif(tmp.wald$Wald_pvlaue, 3)), sep = "\n")
+    factors <- levels(dat_sur$Cluster)
+    surv_fit <- survfit(Surv(OS.Time, OS) ~ Cluster, data = dat_sur)
+    info <- data.frame(time = surv_fit$time,
+                  n.risk = surv_fit$n.risk,
+                  n.event = surv_fit$n.event,
+                  n.censor = surv_fit$n.censor,
+                  surv = surv_fit$surv,
+                  upper = surv_fit$upper,
+                  lower = surv_fit$lower)
+  
+    sur_pl <- ggsurvplot(surv_fit,
+             data = dat_sur,  
+             surv.median.line = "hv",
+             add.all = TRUE,
+             palette = "aaas",
+             risk.table = TRUE, 
+             xlab = "Follow up time(Years)", 
+             legend = c(0.8, 0.2), 
+             legend.title = "",
+             legend.labs = c("all", factors), 
+             break.x.by = 2,
+             font.legend = c(10, "italic"),
+             ggtheme = theme_bw())
+    sur_pl$plot <- sur_pl$plot + 
+             annotate("text", x=3, y=0.2, label=pvalue)
+    
+    cbind_pl <- plot_grid(scatter_pl, sur_pl$plot, sur_pl$table, 
+                                   ncol = 1, align = "hv", 
+                                   rel_heights = c(4, 3, 1.5))
+    name <- paste0("K", i)
+    cluster_plot[[name]] <- cbind_pl
+  }
+  return(cluster_plot)
+}
+kcluster_plot_list <- get_cluster(knum = num) 
+```
+
+* k=2 clusters
+```{r, fig.height=8, fig.width=6}
+kcluster_plot_list$K2
+ggsave("../../Result/figure/cluster/cluster_k2_PCA.pdf", kcluster_plot_list$K2, width = 6, height = 8, dpi = 600)
+```
+
+* k=3 clusters
+```{r, fig.height=8, fig.width=6}
+kcluster_plot_list$K3
+ggsave("../../Result/figure/cluster/cluster_k3_PCA.pdf", kcluster_plot_list$K3, width = 6, height = 8, dpi = 600)
+```
+
+* k=4 clusters
+```{r, fig.height=10, fig.width=6}
+kcluster_plot_list$K4
+ggsave("../../Result/figure/cluster/cluster_k4_PCA.pdf", kcluster_plot_list$K4, width = 6, height = 9, dpi = 600)
+```
+
+* k=5 clusters
+```{r, fig.height=10, fig.width=6}
+kcluster_plot_list$K5
+ggsave("../../Result/figure/cluster/cluster_k5_PCA.pdf", kcluster_plot_list$K5, width = 6, height = 10, dpi = 600)
+```
+
+* k=6 clusters
+```{r, fig.height=10, fig.width=6}
+kcluster_plot_list$K6
+ggsave("../../Result/figure/cluster/cluster_k6_PCA.pdf", kcluster_plot_list$K6, width = 6, height = 10, dpi = 600)
+```
+
+
+### the final sub-clusters label
+```{r}
+phen_new <- inner_join(phen,
+              data.frame(silhouette_index_fit$pamobject$clustering) %>% 
+               setNames("Cluster") %>% 
+               rownames_to_column("Barcode"), 
+             by = "Barcode") %>% 
+  dplyr::select(Barcode, Cluster, everything()) %>%
+  mutate(Cluster=paste0("S", Cluster))
+
+write.csv(phen_new, "../../Result/phenotype/phenotype_cluster_PCA.csv", row.names = F)
+
+table(phen_new$Cluster)
+```
+
+_____________________________________________________________________________________________________
+
+### Find the Optimal Number of Clusters
+
+**kmeans(data, centers, nstart)**
+
+*data*: Name of the dataset.
+
+*centers*: The number of clusters, denoted k.
+
+*nstart*: The number of initial configurations. Because it’s possible that different initial starting clusters can lead to different results, it’s recommended to use several different initial configurations. The k-means algorithm will find the initial configurations that lead to the smallest within-cluster variation.
+
+* Number of Clusters vs. the Total Within Sum of Squares
+```{r}
+fviz_nbclust(feature_cln, kmeans, method = "wss")
+```
+
+
+* Number of Clusters vs. Gap Statistic
+```{r}
+# calculate gap statistic based on number of clusters
+gap_stat <- clusGap(feature_cln,
+                    FUN = kmeans,
+                    nstart = 25,
+                    K.max = 10,
+                    B = 50)
+
+# plot number of clusters vs. gap statistic
+fviz_gap_stat(gap_stat)
+```
+
+
+* Perform K-Means Clustering with Optimal K
+```{r}
+# make this example reproducible
+set.seed(123)
+
+# perform k-means clustering with k = 4 clusters
+km <- kmeans(feature_cln, centers = 2, nstart = 30)
+
+# view results
+km
+
+# compare the cluster result between kmeans and pamk
+# data.frame(km$cluster) -> knn_cluster
+# data.frame(Calinski_Harabasz_fit$pamobject$clustering) -> pamk_cluster
+# cluster_res <- inner_join(knn_cluster %>% rownames_to_column("SampleID"), pamk_cluster %>% rownames_to_column("SampleID"), by ="SampleID") %>% setNames(c("SampleID", "knn", "pamk")) %>% mutate(Status = ifelse(knn == pamk, "Match", "Unmatch"))
+# table(cluster_res$Status)
+```
+
+From the results we can see that:
+
+* 196 states were assigned to the first cluster
+* 91 states were assigned to the second cluster
+
+
+* plot results of final k-means model
+```{r}
+fviz_cluster(km, data = feature_cln)
+```
+
+* find means of each cluster
+```{r}
+aggregate(feature_cln, by=list(cluster=km$cluster), mean)
+```
+
+* We can also append the cluster assignments of each state back to the original dataset
+```{r}
+# add cluster assigment to original data
+final_data <- cbind(cluster = km$cluster, feature_cln)
+
+# view final data
+head(final_data)
+```
+
+
+### Rtsne plot for K=2 clusters
+```{r}
+RtsneFun <- function(profile=feature,
+                     metadata=phen_new,
+                     perpl=50){
+  
+  # profile=feature
+  # metadata=phen_new
+  # perpl=50
+  
+  sid <- intersect(profile$SampleID, metadata$Barcode)
+  
+  pheno <- metadata %>% filter(Barcode%in%sid) %>%
+    column_to_rownames("Barcode")
+  edata <- profile %>% column_to_rownames("SampleID") %>% 
+    t() %>% data.frame() %>%
+    dplyr::select(rownames(pheno))
+  
+  # determine the right order between profile and phenotype 
+  for(i in 1:ncol(edata)){ 
+    if (!(colnames(edata)[i] == rownames(pheno)[i])) {
+      stop(paste0(i, " Wrong"))
+    }
+  }
+  
+  # Rtsne 
+  require(Rtsne)
+  set.seed(123)
+  Rtsne <- Rtsne(t(edata), dims=2, perplexity=perpl, 
+                verbose=TRUE, max_iter=500, eta=200)
+  point <- Rtsne$Y %>% data.frame() %>% 
+    dplyr::select(c(1:2))%>% 
+    setnames(c("tSNE1", "tSNE2"))
+  rownames(point) <- rownames(t(edata))
+  # principal component score of each sample
+  score <- inner_join(point %>% rownames_to_column("SampleID"), 
+                      pheno %>% rownames_to_column("SampleID"), 
+                      by = "SampleID") %>%
+    mutate(Cluster=factor(Cluster, levels = grp))
+  
+  pl <- ggplot(score, aes(x=tSNE1, y=tSNE2))+
+              geom_point(aes(color=Cluster), size=2)+
+              guides(color=guide_legend(title=NULL,keywidth=.7, keyheight=.7))+
+              scale_color_manual(values = grp.col)+
+              theme_bw()+
+              theme(axis.title = element_text(size=10, color="black", face="bold"),
+                    axis.text = element_text(size=9, color="black"),
+                    text = element_text(size=8, color="black", family="serif"),
+                    strip.text = element_text(size=9, color="black", face="bold", family="serif"), 
+                    panel.grid = element_blank(),
+                    legend.text=element_text(size=11, color = "black", family="serif"),
+                    legend.position = c(0, 0),
+                    legend.justification = c(0, 0),
+                    legend.background = element_rect(color = "black", fill="white"))
+ 
+  return(pl)
+}
+
+K2_rstne <- RtsneFun(profile=feature,metadata=phen_new,perpl=50)
+K2_rstne
+ggsave("../../Result/figure/cluster/cluster_k2_rstne.pdf", K2_rstne, width = 6, height = 5, dpi = 600)
+```
+
+
+### Pros & Cons of K-Means Clustering
+
+K-means clustering offers the following benefits:
+
+* It is a fast algorithm.
+
+* It can handle large datasets well.
+
+However, it comes with the following potential drawbacks:
+
+* It requires us to specify the number of clusters before performing the algorithm.
+
+* It’s sensitive to outliers.
+
+
+
+### version
+```{r}
+sessionInfo()
+```
+
+
+### Reference 
+
+1. [K-Means Clustering in R: Step-by-Step Example](https://www.statology.org/k-means-clustering-in-r/#:~:text=%20K-Means%20Clustering%20in%20R%3A%20Step-by-Step%20Example%20,Clusters.%20Because%20it%E2%80%99s%20possible%20that%20different...%20More%20)
+
+2. [Partitioning Around Medoids With Estimation Of Number Of Clusters](https://www.rdocumentation.org/packages/fpc/versions/2.2-5/topics/pamk)

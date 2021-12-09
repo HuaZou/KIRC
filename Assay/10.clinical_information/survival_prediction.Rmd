@@ -1,0 +1,387 @@
+---
+title: "survival prediction on clinical features"
+date: "Created: 2021-01-23; updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(stringr)
+library(survival)
+library(data.table)
+library(glmnet)
+library(c060)
+library(peperr)
+library(Hmisc)
+
+rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+```
+
+
+## Introduciton
+
+> The Cox proportional hazards model is commonly used for the study of the relationship beteween predictor variables and survival time and penalize the negative log of the partial likelihood with an elastic net penalty via glmnet R package.
+
+### load data
+```{r}
+phen <- fread("../../Result/phenotype/phenotype_cluster.csv")
+```
+
+
+### Function
+
+* sole clinical features
+
+* clinical features + autoencoder labels
+```{r}
+get_clinical <- function(x=phen){
+  
+  # x=phen
+  
+  # pathologic_T 
+  x$Te1 <- str_extract(x$TNM, "T\\d[a-z]+")
+  x$Te2 <- str_extract(x$TNM, "T\\d")
+  x$Te1 <- with(x, ifelse(is.na(Te1), Te2, Te1))
+  x$Te2[x$Te2 == "T1"] <- 1
+  x$Te2[x$Te2 == "T2"] <- 2
+  x$Te2[x$Te2 == "T3"] <- 3
+  x$Te2[x$Te2 == "T4"] <- 4
+  
+  # pathologic_N
+  x$N <- str_extract(x$TNM, "N\\d")
+  x$N <- str_extract(x$N, "\\d")
+  x$N[is.na(x$N)] <- 2
+  
+  # pathologic_M
+  x$M <- str_extract(x$TNM, "M\\d")
+  x$M <- str_extract(x$M, "\\d")
+  x$M[is.na(x$M)] <- 2
+  
+  # Gender
+  x$Gender <- ifelse(x$Gender == "MALE", 1, 2)
+  
+  # stage
+  x$Stage1 <- str_trim(str_extract(x$Stage, "\\s[H-Z]+"),
+                              side = c("both", "left", "right"))
+  x$Stage1[x$Stage1 == "I"] <- 1
+  x$Stage1[x$Stage1 == "II"] <- 2
+  x$Stage1[x$Stage1 == "III"] <- 3
+  x$Stage1[x$Stage1 == "IV"] <- 4
+  x$Stage1[is.na(x$Stage1)] <- 5
+  
+  # remove NA value 
+  # x$N <- ifelse(is.na(x$N), "Unknown", x$N)
+  # x$M <- ifelse(is.na(x$M), "Unknown", x$M)
+  # x$Stage1 <- ifelse(is.na(x$Stage1), "Unknown", x$Stage1)
+  # x$Grade <- ifelse(x$Grade%in%c("[Not Available]", "GX"), "Unknown", x$Grade)  
+  # x$cancer_status <- ifelse(x$cancer_status%in%c("[Not Available]", "[Discrepancy]"), 
+  #                           "Unknown", x$cancer_status)
+  # x$Race <- ifelse(x$Race == "[Not Available]", "Unknown", x$Race)
+  # tmp <- x %>% filter(N != "Unknown") %>%
+  #   filter(M != "Unknown") %>%
+  #   filter(Stage1 != "Unknown") %>%
+  #   filter(Grade != "Unknown") %>%
+  #   filter(cancer_status != "Unknown") %>%
+  #   filter(Race != "Unknown")
+  
+  x$Race <- as.numeric(factor(x$Race))
+  x$cancer_status <- as.numeric(factor(x$cancer_status))
+  x$laterality <- as.numeric(factor(x$laterality))
+  x$Grade <- as.numeric(factor(x$Grade))
+  x$Te2 <- as.numeric(factor(x$Te2))
+  x$N <- as.numeric(factor(x$N))
+  x$M <- as.numeric(factor(x$M))
+  x$Stage1 <- as.numeric(factor(x$Stage1))
+  x$Cluster <- as.numeric(factor(x$Cluster)) 
+  
+  res <- x %>% dplyr::select(-c("Stage", "TNM","Te1")) %>%
+    dplyr::rename(Stage=Stage1, T=Te2, time=OS.Time, status=OS) 
+  
+  return(res)  
+}
+
+get_index_score <- function(x=clinical_params,
+                            label=TRUE){
+  
+  # x=get_clinical(x = phen)
+  # label=TRUE
+  
+  size <- round(nrow(x)*0.8)
+  sid <- sample(x$Barcode, size)
+  
+  trainData <- x %>% filter(Barcode%in%sid) %>% column_to_rownames("Barcode")
+  testData <- x %>% filter(!Barcode%in%sid) %>% column_to_rownames("Barcode")
+  
+  if(label){
+    train_phen <- trainData %>% dplyr::select(time, status) %>% as.matrix()
+    train_prof <- subset (trainData, select=c(-time,-status)) %>% as.matrix()
+    
+    test_phen <- testData %>% dplyr::select(time, status) %>% as.matrix()
+    test_prof <- subset (testData, select=c(-time,-status)) %>% as.matrix()    
+  }else{
+    trainData_v2 <- trainData %>% dplyr::select(-Cluster)
+    testData_v2 <- testData %>% dplyr::select(-Cluster)   
+    train_phen <- trainData_v2 %>% dplyr::select(time, status) %>% as.matrix()
+    train_prof <- subset (trainData_v2, select=c(-time,-status)) %>% as.matrix()
+    
+    test_phen <- testData_v2 %>% dplyr::select(time, status) %>% as.matrix()
+    test_prof <- subset (testData_v2, select=c(-time,-status)) %>% as.matrix()     
+  }
+  
+  set.seed(123)
+  cv.fit <- cv.glmnet(x=train_prof, 
+                      y=train_phen, 
+                      family = "cox", 
+                      type.measure = "C", # Harrel's concordance
+                      nfolds = 10,
+                      alpha = 0,
+                      nlambda = 100)
+  # plot(cv.fit)  
+  
+  # build model
+  fit <- glmnet(x=train_prof, 
+                y=train_phen, 
+                family = "cox", 
+                alpha = 0,
+                lambda = cv.fit$lambda.min) # For a more parsimoneous model use lambda.1se
+  # coef(fit)
+  
+  # C-index
+  pred <- predict(fit, newx = test_prof)
+  cindex <- apply(pred, 2, Cindex, y=test_phen)
+  
+  res <- list(cv_fit=cv.fit, fit=fit, cindex=cindex)
+  return(res)
+}
+```
+
+### prediction
+
+* with Cluster labels
+```{r}
+clinical_params <- get_clinical(x = phen)
+
+sur_label <- get_index_score(x = clinical_params, label = TRUE)
+# cv fit 
+plot(sur_label$cv_fit)
+# fit
+coef(sur_label$fit)
+# Cindex 
+sur_label$cindex
+```
+
+* without Cluster labels
+```{r}
+sur_nolabel <- get_index_score(x = clinical_params, label = FALSE)
+# cv fit 
+plot(sur_nolabel$cv_fit)
+# fit
+coef(sur_nolabel$fit)
+# Cindex 
+sur_nolabel$cindex
+```
+
+
+### version
+```{r}
+sessionInfo()
+```
+
+
+### Reference 
+
+1. [Regularized Cox Regression](https://glmnet.stanford.edu/articles/Coxnet.html) 
+
+2. [How and when: ridge regression with glmnet](https://drsimonj.svbtle.com/ridge-regression-with-glmnet)
+
+3. [一致性指数：Harrell’concordance index:C-index](https://www.jianshu.com/p/5e648f0f49ed)
+
+4. [Calculate Concordance index](https://glmnet.stanford.edu/reference/Cindex.html)
+
+5. [Calculate Brier score on glmnet object](https://stats.stackexchange.com/questions/63530/problem-with-bootcv-for-coxph-in-pec-after-feature-selection-with-glmnet-lasso)
+
+6. [Calculate Brier score on glmnet object](https://pastebin.com/yNpZMzNc)
+
+### the codes from the network
+```{r}
+library(survival)
+library(glmnet)
+library(c060)
+library(peperr)
+library(Hmisc)
+##-----------------------------------------------------------------------------------
+##                                    Accessory Functions
+##-----------------------------------------------------------------------------------
+## 
+## This function takes a predictor matrix and a Surv obj and uses the glmnet lasso 
+## regularization method to select the most predictive features and create a coxph 
+## object predict_matrix is the 'dataset' reformated to replace categorical variables
+## to binary with dummy
+ 
+dataset2predictmatrix <- function(dataset, 
+                                  nonzero.coef=NULL){
+  
+  # creat Y (survival matrix) for glmnet
+  surv_obj <- Surv(dataset$time,dataset$status) 
+ 
+  # tranform categorical variables into binary variables with dummy for dataset
+  predict_matrix <- model.matrix(~ ., data=dataset, 
+                     contrasts.arg=lapply(dataset[,sapply(dataset, is.factor)], 
+                                          contrasts))
+ 
+  # remove the statu/time variables from the predictor matrix (x) for glmnet
+  predict_matrix <- subset(predict_matrix, select=c(-time,-status))
+ 
+  if(!is.null(nonzero.coef)){
+    predict_matrix <- predict_matrix[, nonzero.coef]
+  }
+ 
+  res <- list(predict_matrix=predict_matrix, surv_obj=surv_obj)
+  return(res)
+}
+ 
+glmnetfun <- function(predict_matrix, surv_obj){
+ 
+  # create a glmnet cox object using lasso regularization and cross validation
+  glmnet.cv <- cv.glmnet(predict_matrix, surv_obj, family="cox")
+ 
+  # get the glmnet model 
+  glmnet.obj <- glmnet.cv$glmnet.fit
+ 
+  # find lambda index for the models with least partial likelihood deviance (by cv.glmnet) 
+  optimal.lambda <- glmnet.cv$lambda.min    # For a more parsimoneous model use lambda.1se     
+  lambda.index <- which(glmnet.obj$lambda == optimal.lambda) 
+ 
+  # take beta for optimal lambda 
+  optimal.beta <- glmnet.obj$beta[, lambda.index] 
+ 
+  # find non zero beta coef 
+  nonzero.coef <- abs(optimal.beta) > 0 
+  selectedBeta <- optimal.beta[nonzero.coef] 
+ 
+  # take only covariates for which beta is not zero 
+  selectedVar <- predict_matrix[, nonzero.coef] 
+ 
+  # create a dataframe for trainSet with time, status and selected variables in binary representation for evaluation in pec
+  reformat_dataSet <- as.data.frame(cbind(surv_obj, selectedVar))
+ 
+  # create coxph object with pre-defined coefficients 
+  glmnet.cox <- coxph(Surv(time,status) ~ ., data=reformat_dataSet, init=selectedBeta, iter=200)
+ 
+  # # glmnet.cox only with meaningful features selected by stepwise bidirectional AIC feature selection
+  # glmnet.cox.meaningful <- step(coxph(Surv(time,status) ~ ., data=reformat_dataSet), direction="both")
+  # selectedVarCox <- selectedVar[, attr(glmnet.cox.meaningful$terms, "term.labels")]
+  
+  # Returned object -> list with glmnet.cv glmnet.obj selectecVar reformat_dataSet
+  res <- list(glmnet.cv=glmnet.cv, glmnet.obj=glmnet.obj, glmnet.cox=glmnet.cox, 
+              nonzero.coef=nonzero.coef, selectedVar=selectedVar, 
+              reformat_dataSet=reformat_dataSet
+              # glmnet.cox.meaningful=glmnet.cox.meaningful, selectedVarCox=selectedVarCox
+              )
+  return(res)
+}
+ 
+ 
+## This function takes as input a surv_obj (testdate Surv object) and a testdata prediction matrix. Calculates a Brier score
+## for either a cox model or a glmnet. Returns an ipec object which is the Brier score (requires peperr and c060)
+ 
+brier_calc <- function(surv_obj, predict_matrix, model=c("cox","glmnet")){
+  
+  if(model == "cox"){
+    peperr <- peperr.cox <- peperr(response=surv_obj, x=predict_matrix,
+                                   fit.fun=fit.coxph, load.all=TRUE,
+                                   indices=resample.indices(n=nrow(surv_obj), method="boot",
+                                                            sample.n=50))      
+  }else if(model == "glmnet"){
+    peperr <- peperr(response=surv_obj, x=predict_matrix,
+                     fit.fun=fit.glmnet, args.fit=list(family="cox"),
+                     complexity=complexity.glmnet,args.complexity=list(family="cox"), load.all=TRUE,
+                     indices=resample.indices(n=nrow(surv_obj), method="boot", sample.n=50))
+  }
+ 
+  # Get error predictions from peperr
+  prederr <- perr(peperr)
+ 
+  # Integrated prediction error Brier score calculation
+  ipec <- ipec(prederr, eval.times=peperr$attribute, response=surv_obj)
+ 
+  res <- list(peperr=peperr, ipec=ipec)
+  return(res)
+}
+ 
+ 
+trainset <- dataset2predictmatrix(dataset)
+models <- glmnetfun(trainset$predict_matrix, trainset$surv_obj)
+# rfsrc <- rfsrcfunc(dataset)
+briercox <- brier_calc(trainset$surv_obj, models$selectedVar, model="cox")
+# requires c060 package which doesn't work on Linux
+brierglmnet <- brier_calc(trainset$surv_obj, trainset$predict_matrix, model="glmnet")
+
+
+# briermeaningful <- brier_calc(trainset$surv_obj, models$selectedVarCox, model="cox")
+# brierRFSRC <- pec_calc(rfsrc$obj, dataset)
+# brierRfit <- pec_calc(rfsrc$rfit, rfsrc$selectedDataset)
+# # calculate brier score for coxph with feature selection based on rfsrc
+# selectedDataset <- dataset2predictmatrix(rfsrc$selectedDataset)
+# brierCox.rfsrc <- brier_calc(selectedDataset$surv_obj, selectedDataset$predict_matrix, model="cox")
+
+# save image of the workspace after each iteration
+save.image(file)
+ 
+## C-Index calculation 50 iter bootstrapping
+## initialization of lists for various outputs
+cIndexCox <- list()
+cIndexglmnet <- list ()
+# cIndexCoxAIC <- list()
+# cIndexRFSRC <- list()
+# cIndexRfit <- list()
+# cIndexCox.rfsrc <- list()
+ 
+i <- 1
+# pb <- txtProgressBar(min = 1, max = 50, style = 3) ## initialize a progress bar
+train_results_list <- list()
+# rfsrc_train_list <- list()
+ 
+ 
+while (i < 51){
+  
+  print(paste("Iteration:",i))
+# setTxtProgressBar(pb, i)## run progress bar
+  train <- sample(1:nrow(dataset), nrow(dataset), replace = TRUE) ## random sampling with replacement
+# create a dataframe for trainSet with time, status and selected variables in binary representation for evaluation in pec
+  trainset <- dataset[train,]
+  testset <- dataset[-train,]
+  train_matrix <- dataset2predictmatrix(trainset)
+ 
+  train_results <- glmnetfun(train_matrix$predict_matrix, train_matrix$surv_obj) #runs the sequence of glmnet.cv->glmnet.obj->glmnet.cox
+  train_results_list <- c(train_results_list, list(train_results)) #create a list of results of all runs
+ 
+  # compute c-index (Harrell's) for cox-glmnet models
+  if (!is.null(train_results$glmnet.cox)){
+    # creates a matrix of only the variables identified by the glmnet
+    test_matrix <- dataset2predictmatrix(testset, nonzero.coef=train_results$nonzero.coef)
+    reformat_testSet <- as.data.frame(cbind(test_matrix$surv_obj, test_matrix$predict_matrix)) #casts matrix to dataframe
+    cIndexCox <- c(cIndexCox, 1-rcorr.cens(predict(train_results$glmnet.cox, 
+                                                   reformat_testSet), test_matrix$surv_obj)[1])
+    i=i+1
+    # compute c-index (Harrell's) for glmnet models
+    test_matrix <- dataset2predictmatrix (testset) # create matrix of the entire testset for glmnet evaluation
+    cIndexglmnet <- c(cIndexglmnet, 1-rcorr.cens(predict(train_results$glmnet.cv,                                                      test_matrix$predict_matrix),test_matrix$surv_obj)[1])
+ 
+    save.image(file)
+  }
+ 
+}
+
+meanCICox <- c(mean(unlist(cIndexCox), na.rm=TRUE), std.error(unlist(cIndexCox)))
+meanCIglmnet <- c(mean(unlist(cIndexglmnet), na.rm=TRUE), std.error(unlist(cIndexglmnet)))
+```

@@ -1,0 +1,217 @@
+---
+title: "K-means clustering analysis"
+date: "Created: 2021-01-20; updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(data.table)
+library(survival)
+library(survminer)
+library(factoextra)
+
+rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+
+grp <- c("S1", "S2")
+grp.col <- c("#6C326C", "#77A2D1")
+```
+
+
+### load data
+```{r}
+phen <- fread("../../Result/phenotype/phenotype_cluster_iCluster.csv")
+prof <- fread("../../Result/profile/All_filter_merge_profile.tsv") 
+```
+
+
+### Scatterplot 
+```{r}
+get_surpl <- function(phenotype=phen){
+    
+  # phenotype=phen
+
+  # survival analysis 
+  dat_sur <- phenotype %>% mutate(Cluster=factor(Cluster, levels = grp)) %>%
+      dplyr::select(Cluster, OS.Time, OS)
+  cox <- coxph(Surv(OS.Time, OS) ~ Cluster, data = dat_sur)
+  tmp <- summary(cox)
+  tmp.wald <- data.frame(t(tmp$waldtest)) %>%
+        setNames(c("Wald_test", "Wald_df", "Wald_pvlaue"))
+  tmp.lg <- data.frame(t(tmp$logtest)) %>%
+        setNames(c("lg_rank", "lg_rank_df", "lg_rank_pvlaue"))
+  tmp.total <- cbind(tmp.wald, tmp.lg) 
+    
+  pvalue <- paste(paste0("Log-Rank P=", signif(tmp.lg$lg_rank_pvlaue, 3)), 
+                  paste0("Cox P=", signif(tmp.wald$Wald_pvlaue, 3)), sep = "\n")
+  factors <- levels(dat_sur$Cluster)
+  surv_fit <- survfit(Surv(OS.Time, OS) ~ Cluster, data = dat_sur)
+  
+  sur_pl <- ggsurvplot(surv_fit,
+             data = dat_sur,  
+             surv.median.line = "hv",
+             add.all = TRUE,
+             palette = "aaas",
+             risk.table = TRUE, 
+             xlab = "Follow up time(Years)", 
+             legend = c(0.8, 0.2), 
+             legend.title = "",
+             legend.labs = c("all", factors), 
+             break.x.by = 2,
+             font.legend = c(10, "italic"),
+             ggtheme = theme_bw())
+  sur_pl$plot <- sur_pl$plot + 
+             annotate("text", x=3, y=0.2, label=pvalue)
+    
+  pl <- plot_grid(sur_pl$plot, sur_pl$table, 
+                     ncol = 1, align = "hv", 
+                     rel_heights = c(3, 1.5))
+    
+  return(pl)
+}
+
+RtsneFun <- function(profile=prof,
+                     metadata=phen,
+                     perpl=50){
+  
+  # profile=prof
+  # metadata=phen
+  # perpl=50
+  
+  sid <- intersect(profile$SampleID, metadata$Barcode)
+  
+  pheno <- metadata %>% filter(Barcode%in%sid) %>%
+    column_to_rownames("Barcode")
+  edata <- profile %>% column_to_rownames("SampleID") %>% 
+    t() %>% data.frame() %>%
+    dplyr::select(rownames(pheno))
+  
+  # determine the right order between profile and phenotype 
+  for(i in 1:ncol(edata)){ 
+    if (!(colnames(edata)[i] == rownames(pheno)[i])) {
+      stop(paste0(i, " Wrong"))
+    }
+  }
+  
+  # Rtsne 
+  require(Rtsne)
+  set.seed(123)
+  Rtsne <- Rtsne(t(edata), dims=2, perplexity=perpl, 
+                verbose=TRUE, max_iter=500, eta=200)
+  point <- Rtsne$Y %>% data.frame() %>% 
+    dplyr::select(c(1:2))%>% 
+    setnames(c("tSNE1", "tSNE2"))
+  rownames(point) <- rownames(t(edata))
+  # principal component score of each sample
+  score <- inner_join(point %>% rownames_to_column("SampleID"), 
+                      pheno %>% rownames_to_column("SampleID"), 
+                      by = "SampleID") %>%
+    mutate(Cluster=factor(Cluster, levels = grp))
+  
+  pl <- ggplot(score, aes(x=tSNE1, y=tSNE2))+
+              geom_point(aes(color=Cluster), size=2)+
+              guides(color=guide_legend(title=NULL,keywidth=.7, keyheight=.7))+
+              scale_color_manual(values = grp.col)+
+              theme_bw()+
+              theme(axis.title = element_text(size=10, color="black", face="bold"),
+                    axis.text = element_text(size=9, color="black"),
+                    text = element_text(size=8, color="black", family="serif"),
+                    strip.text = element_text(size=9, color="black", face="bold", family="serif"), 
+                    panel.grid = element_blank(),
+                    legend.text=element_text(size=11, color = "black", family="serif"),
+                    legend.position = c(0, 0),
+                    legend.justification = c(0, 0),
+                    legend.background = element_rect(color = "black", fill="white"))
+ 
+  return(pl)
+}
+
+# PCA 
+pcafun <- function(profile=prof,
+                   metadata=phen){
+  
+  # profile=prof
+  # metadata=phen
+  
+  sid <- intersect(profile$SampleID, metadata$Barcode)
+  
+  pheno <- metadata %>% filter(Barcode%in%sid) %>%
+    mutate(Cluster=factor(Cluster, levels = grp)) %>%
+    column_to_rownames("Barcode")
+  edata <- profile %>% column_to_rownames("SampleID") %>% 
+    t() %>% data.frame() %>%
+    dplyr::select(rownames(pheno))
+  
+  # determine the right order between profile and phenotype 
+  for(i in 1:ncol(edata)){ 
+    if (!(colnames(edata)[i] == rownames(pheno)[i])) {
+      stop(paste0(i, " Wrong"))
+    }
+  }
+  
+  pca <- prcomp(t(edata), scale. = TRUE, center = T)
+  require(factoextra)
+  eig <- get_eig(pca)
+  # explains variable 
+  explains <- paste0(paste0("PC", seq(2)), "(", paste0(round(eig[1:2, 2], 2), "%"), ")")  
+  score <- inner_join(pca$x %>% data.frame() %>% 
+                        rownames_to_column("SampleID")  %>%  
+                        dplyr::select(c(1:3)) , 
+                        pheno %>% rownames_to_column("SampleID"),
+                      by = "SampleID")
+
+  pl <- ggplot(score, aes(x=PC1, y=PC2))+
+          geom_point(aes(color=Cluster), size=2)+
+          guides(color=guide_legend(keywidth=.7, keyheight=.7))+
+          scale_color_manual(values = grp.col)+
+          labs(x=explains[1], y=explains[2])+
+          theme_bw()+
+          theme(axis.title = element_text(size=10, color="black", face="bold"),
+                axis.text = element_text(size=9, color="black"),
+                text = element_text(size=8, color="black", family="serif"),
+                strip.text = element_text(size=9, color="black", face="bold", family="serif"), 
+                panel.grid = element_blank(),
+                legend.text=element_text(size=11, color = "black", family="serif"),
+                legend.background = element_rect(color = "black", fill="white"),
+                legend.position = c(0, 0),
+                legend.justification = c(0, 0),)
+  return(pl)  
+}
+```
+
+
+### plot survival plot 
+```{r, fig.height=6, fig.width=6}
+surpl <- get_surpl(phenotype = phen)
+surpl
+```
+
+### Scatterplot 
+```{r}
+pl2 <- pcafun(profile=prof, metadata=phen)
+pl2
+```
+
+### merge 
+```{r, fig.height=8, fig.width=6}
+merge_pl <- plot_grid(pl2, surpl, 
+                       ncol = 1, align = "hv", 
+                       rel_heights = c(1, 1.5))
+
+ggsave("../../Result/figure/cluster/cluster_k2_iCluster.pdf", merge_pl, width = 6, height = 8, dpi = 600)
+```
+
+### version
+```{r}
+sessionInfo()
+```

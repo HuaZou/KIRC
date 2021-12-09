@@ -1,0 +1,244 @@
+---
+title: "Curate data"
+date: "Created: 2021-01-06; updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+### Introduction
+
+We first used TCGA-Assembler Version 2 with the keywords **KIRC** to search and process the four-omics data (CNVs; mRNA; DNA methylation; RPPA), and then performed the next precedure to filter the unmatched data. 
+
+The original script for downloading the RawData was here *KIRC/Study/Script/data-KIRC.R*
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(data.table)
+library(ggplot2)
+library(impute)
+
+rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+```
+
+
+
+### load phenotype
+```{r}
+phen <- read.csv("../../Study/Phenotype/KIRC_clinical__information.csv")
+prof <- fread("../../Study/RawData/290samples_expression.txt")
+```
+
+
+### curation
+
+#### choose index of the phenotype for survival analysis
+```{r}
+phen.cln <- phen %>% 
+  mutate(stage_event_tnm_categories = paste0(pathologic_T, pathologic_N, pathologic_M)) %>%
+  dplyr::select(bcr_patient_barcode, gender, vital_status, days_to_death, 
+                          days_to_last_followup, race, person_neoplasm_cancer_status, 
+                          age_at_initial_pathologic_diagnosis, laterality, 
+                          neoplasm_histologic_grade, pathologic_stage, stage_event_tnm_categories) %>%
+  distinct(bcr_patient_barcode, .keep_all = TRUE)
+
+# dead_patient 
+dead_patient <- phen.cln %>%
+  dplyr::filter(vital_status == "Dead") %>%
+  dplyr::select(-days_to_last_followup) %>%
+  reshape::rename(c(bcr_patient_barcode = "Barcode",
+           gender = "Gender",
+           vital_status = "OS",
+           days_to_death = "OS.Time",
+           race = "Race",
+           person_neoplasm_cancer_status = "cancer_status",
+           age_at_initial_pathologic_diagnosis = "Age",
+           neoplasm_histologic_grade = "Grade",
+           pathologic_stage = "Stage",
+           stage_event_tnm_categories = "TNM")) %>%
+  mutate(OS = ifelse(OS == "Dead", 1, 0)) %>%
+  mutate(OS.Time = as.numeric(as.character(OS.Time))/365)
+
+# alive_patient 
+alive_patient <- phen.cln %>%
+  dplyr::filter(vital_status == "Alive") %>%
+  dplyr::select(-days_to_death) %>%
+  reshape::rename(c(bcr_patient_barcode = "Barcode",
+           gender = "Gender",
+           vital_status = "OS",
+           days_to_last_followup = "OS.Time",
+           race = "Race",
+           person_neoplasm_cancer_status = "cancer_status",
+           age_at_initial_pathologic_diagnosis = "Age",
+           neoplasm_histologic_grade = "Grade",
+           pathologic_stage = "Stage",
+           stage_event_tnm_categories = "TNM")) %>%
+  mutate(OS = ifelse(OS == "Dead", 1, 0)) %>%
+  mutate(OS.Time = as.numeric(as.character(OS.Time))/365)
+
+
+# combine data 
+survival_data <- rbind(dead_patient, alive_patient) %>%
+  mutate(Barcode = gsub("-", "_", Barcode))
+```
+
+
+
+#### filter expression matrix
+
+* First, the biological features (e.g. genes/miRNAs) were removed if having zero value in more than 20% of patients. 
+
+* The samples were removed if missing across more than 20% features. 
+
+* Then we used impute function from R impute package, to fill out the missing values. 
+
+* Lastly, we removed input features with zero values across all samples.
+
+```{r}
+get_profile <- function(profile    = prof,
+                        metadata   = survival_data,
+                        occurrence = 0.2,
+                        present    = 0.2){
+  # profile    = prof
+  # metadata   = survival_data
+  # occurrence = 0.2
+  # present    = 0.2
+  
+  colnames(profile) <- c(colnames(profile)[1:3], gsub("-", "_", colnames(profile)[4:ncol(profile)]))
+
+  filter_fill_fun <- function(tag){
+    
+    # tag = data_type[1]
+    
+    dat <- profile %>% filter(Platform == tag) %>%
+                dplyr::select(-c("Platform", "Description"))
+    # feature occurrence
+    feature_occ <- apply(dat[, -1], 1, function(x){sum(x[!is.na(x)] != 0)/length(x)}) %>% 
+      data.frame() %>% 
+      setNames("feature_occurrence") %>%
+      mutate(GeneSymbol = dat$GeneSymbol)
+    remain_feature <- feature_occ %>% filter(feature_occurrence > occurrence)
+    
+    # sample occurrence 
+    sample_occ <- apply(dat[, -1], 2, function(x){sum(x[!is.na(x)] != 0)/length(x)}) %>% 
+      data.frame() %>% 
+      setNames("sample_occurrence") %>%
+      rownames_to_column("sample")
+    remain_sample <- sample_occ %>% filter(sample_occurrence > present)
+    
+    # remove duplicate features
+    dat.cln <- dat %>% filter(GeneSymbol%in%as.character(remain_feature$GeneSymbol)) %>%
+      dplyr::select(c("GeneSymbol", as.character(remain_sample$sample))) 
+    dat.cln$median <- apply(dat.cln[, -1], 1, median)
+    dat.cln <- with(dat.cln, dat.cln[order(GeneSymbol, median, decreasing = T), ])
+    dat.symbol <- dat.cln[!duplicated(dat.cln$GeneSymbol), ] %>%
+      dplyr::select(-median) %>% 
+      column_to_rownames("GeneSymbol")
+    
+    # impute.knn 
+    set.seed(12345)
+    saved.state <- .Random.seed
+    dat.imputed <- impute.knn(as.matrix(dat.symbol))
+    
+    return(dat.imputed)    
+  }
+  
+  data_type <- unique(profile$Platform)
+  #print(data_type)
+  copyNumber <- filter_fill_fun(data_type[1])
+  geneExp <- filter_fill_fun(data_type[2])
+  methylation <- filter_fill_fun(data_type[3])
+  protein_RPPA <- filter_fill_fun(data_type[4])
+  
+  copyNumber_prf <- copyNumber$data
+  geneExp_prf <- geneExp$data
+  methylation_prf <- methylation$data
+  protein_RPPA_prf <- protein_RPPA$data
+  
+  common_sampleid <- intersect(metadata$Barcode, 
+                        intersect(colnames(copyNumber_prf), 
+                          intersect(colnames(geneExp_prf), 
+                            intersect(colnames(methylation_prf), colnames(protein_RPPA_prf))
+                          )
+                        )
+                                  
+                      )
+  
+  metadata.cln <- metadata %>% filter(Barcode %in% common_sampleid)
+  copyNumber_prf.cln <- copyNumber_prf[, colnames(copyNumber_prf)%in%common_sampleid]
+  geneExp_prf.cln <- geneExp_prf[, colnames(geneExp_prf)%in%common_sampleid]
+  methylation_prf.cln <- methylation_prf[, colnames(methylation_prf)%in%common_sampleid]
+  protein_RPPA_prf.cln <- protein_RPPA_prf[, colnames(protein_RPPA_prf)%in%common_sampleid]
+  
+  
+  res <- list(meta = metadata.cln, 
+              CN = copyNumber_prf.cln,
+              GE = geneExp_prf.cln,
+              ML = methylation_prf.cln,
+              PR = protein_RPPA_prf.cln)
+  
+  return(res)
+}
+
+data_trim_res <- get_profile(profile = prof,
+                             metadata = survival_data)
+```
+
+
+### output
+```{r}
+dir_prf <- "../../Result/profile"
+if(!dir.exists(dir_prf)){
+  dir.create(dir_prf)
+}
+
+# copyNumber
+copyNumber.path <- paste(dir_prf, "copyNumber_filter.tsv", sep = "/")
+write.table(data_trim_res$CN, file = copyNumber.path, quote = F, sep = "\t")
+
+# geneExp
+geneExp.path <- paste(dir_prf, "geneExp_filter.tsv", sep = "/")
+write.table(data_trim_res$GE, file = geneExp.path, quote = F, sep = "\t")
+
+# methylation
+methylation.path <- paste(dir_prf, "methylation_filter.tsv", sep = "/")
+write.table(data_trim_res$ML, file = methylation.path, quote = F, sep = "\t")
+
+# protein_RPPA
+protein_RPPA.path <- paste(dir_prf, "protein_RPPA_filter.tsv", sep = "/")
+write.table(data_trim_res$PR, file = protein_RPPA.path, quote = F, sep = "\t")
+
+
+dir_phe <- "../../Result/phenotype"
+if(!dir.exists(dir_phe)){
+  dir.create(dir_phe)
+}
+
+# total 
+all_survival.path <- paste(dir_phe, "all_survival_data.tsv", sep = "/")
+write.table(survival_data, file = all_survival.path, quote = F, sep = "\t", row.names = F)
+
+# total 
+common_survival.path <- paste(dir_phe, "common_survival_data.tsv", sep = "/")
+write.table(data_trim_res$meta, file = common_survival.path, quote = F, sep = "\t", row.names = F)
+```
+
+
+### version
+```{r}
+sessionInfo()
+```
+
+
+### Reference 
+
+1. [TCGA数据下载整理问题](https://www.jianshu.com/p/a2dd6cb7ab13)
+
+1. [fill out the missing values](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2432074/)

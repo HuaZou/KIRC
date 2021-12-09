@@ -1,0 +1,107 @@
+---
+title: "univariate Cox-PH analysis for features"
+date: "Created: 2021-01-23; updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(survival)
+library(survminer)
+library(data.table)
+
+rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+```
+
+
+### load data
+```{r}
+phen <- fread("../../Result/phenotype/common_survival_data.tsv")
+all_prf <- fread("../../Result/profile/All_filter_merge_profile.tsv")
+```
+### Function
+
+* get the log-rank p value per feature 
+```{r}
+get_coxPh <- function(profile=all_prf, 
+                      metadata=phen){
+  
+  # profile=all_prf
+  # metadata=phen
+  
+  
+  mdat <- inner_join(metadata %>% dplyr::select(Barcode, OS.Time, OS),
+                     profile,
+                     by = c("Barcode"="SampleID")) %>%
+          column_to_rownames("Barcode")
+  
+  datphe <- mdat %>% dplyr::select(OS.Time, OS) 
+  datprf <- mdat %>% dplyr::select(-c("OS.Time", "OS")) 
+  
+  res <- apply(datprf, 2, function(x, phe){ 
+    dat <- cbind(phe, Value=x)
+    cox <- coxph(Surv(OS.Time, OS) ~ Value, data = dat)
+    tmp <- summary(cox)
+    wald <- as.numeric(tmp$waldtest)
+    lg <- as.numeric(tmp$logtest)
+    res <- cbind(wald, lg)     
+    
+    
+    },datphe) %>% t() %>% data.frame() %>%
+    setNames(c("Wald_test", "Wald_df", "Wald_pvlaue", 
+               "lg_rank", "lg_rank_df", "lg_rank_pvlaue")) %>%
+    rownames_to_column("FeatureID") %>%
+    mutate(FDR=p.adjust(lg_rank_pvlaue, method = "BH")) %>%
+    arrange(FDR) %>%
+    mutate(Status=ifelse(FDR < 0.05, "Remain", "Discard"))
+  
+  return(res)
+}
+```
+
+
+### calculate
+```{r}
+cox_ph <- get_coxPh(profile = all_prf, metadata = phen)
+
+head(cox_ph)
+
+if(!dir.exists("../../Result/feature")){
+  dir.create("../../Result/feature")
+}
+
+write.csv(cox_ph, "../../Result/feature/univariate_Cox_features.csv", row.names = F)
+```
+
+
+### Choose the top feature
+
+the number of top features based on the autoencoder's result is : **43**, then we ordered the features by the FDR value and then get the top 43 features
+
+
+```{r}
+number <- 43
+
+cox_ph_remain <- cox_ph %>% arrange(desc(FDR)) %>%
+  slice(c(1:43))
+  
+all_prf_trim <- all_prf %>% dplyr::select(SampleID, as.character(cox_ph_remain$FeatureID))
+write.csv(all_prf_trim, "../../Result/feature/univariate_Cox_Remain_features.csv", row.names = F)
+```
+
+
+### version
+```{r}
+sessionInfo()
+```
+

@@ -1,0 +1,133 @@
+---
+title: "ANOVA: analysis of variance"
+date: "Created: 2021-01-20; updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(data.table)
+
+rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+```
+
+### Introduction
+
+Identify the significant features on omics data including copyNumber, geneExpression, methylation and protein_RPPA using ANOVA test, and ranking the features by the F-statistic(alternative parameters: Adjust Pvalue).
+
+### load data 
+```{r}
+phen <- fread("../../Result/phenotype/phenotype_cluster.csv")
+
+copyNumber <- fread("../../Result/profile/copyNumber_filter.tsv")
+geneExp <- fread("../../Result/profile/geneExp_filter.tsv")
+methylation <- fread("../../Result/profile/methylation_filter.tsv")
+protein_RPPA <- fread("../../Result/profile/protein_RPPA_filter.tsv")
+
+table(phen$Cluster)
+```
+
+
+### ANOVA Function
+```{r}
+get_pvalue <- function(dataset=copyNumber){
+  
+  # dataset=copyNumber
+  
+  sid <- intersect(phen$Barcode, colnames(dataset))
+  phe <- phen %>% dplyr::select(Barcode, Cluster) %>%
+    filter(Barcode%in%sid)
+  prf <- dataset %>% column_to_rownames("V1") %>%
+    dplyr::select(as.character(phe$Barcode)) %>% 
+    t() %>% data.frame()
+  
+  # determine the right order between profile and phenotype 
+  for(i in 1:nrow(prf)){ 
+    if (!(rownames(prf)[i] == phe$Barcode[i])) {
+      stop(paste0(i, " Wrong"))
+    }
+  }  
+  
+  res <- apply(prf, 2, function(x, group){
+    dat <- data.frame(Value=x, Group=group)
+    fit <- aov(Value ~ Group, data = dat)
+    df <- summary(fit)
+    tmp <- data.frame(Cluter=unlist(df)) %>% 
+      slice(-grep("2", rownames(.))) %>% 
+      t()    
+    return(as.numeric(tmp[1, ]))
+  }, phe$Cluster) %>%
+    t() %>% data.frame() %>%
+    setNames(c("Df", "Sum_Squre", "Mean_Squre", "F_value", "pvalue")) %>%
+    rownames_to_column("Feature") %>%
+    mutate(Adjust_P = p.adjust(as.numeric(pvalue), method = "BH")) %>%
+    arrange(Adjust_P)
+  
+  return(res)
+}
+```
+
+
+### copyNumber
+```{r}
+copyNumber_anvoa <- get_pvalue(dataset=copyNumber)
+
+if(!dir.exists("../../Result/ANOVA/")){
+  dir.create("../../Result/ANOVA", recursive = T)
+}
+write.csv(copyNumber_anvoa, "../../Result/ANOVA/copyNumber_anvoa.csv", row.names = F)
+```
+
+
+### geneExpression
+```{r}
+geneExp_anvoa <- get_pvalue(dataset=geneExp)
+
+if(!dir.exists("../../Result/ANOVA/")){
+  dir.create("../../Result/ANOVA", recursive = T)
+}
+write.csv(geneExp_anvoa, "../../Result/ANOVA/geneExp_anvoa.csv", row.names = F)
+```
+
+
+### DNA methylation
+```{r}
+methylation_anvoa <- get_pvalue(dataset=methylation)
+
+if(!dir.exists("../../Result/ANOVA/")){
+  dir.create("../../Result/ANOVA", recursive = T)
+}
+write.csv(methylation_anvoa, "../../Result/ANOVA/methylation_anvoa.csv", row.names = F)
+```
+
+
+### protein_RPPA
+```{r}
+protein_RPPA_anvoa <- get_pvalue(dataset=protein_RPPA)
+
+if(!dir.exists("../../Result/ANOVA/")){
+  dir.create("../../Result/ANOVA", recursive = T)
+}
+write.csv(protein_RPPA_anvoa, "../../Result/ANOVA/protein_RPPA_anvoa.csv", row.names = F)
+```
+
+
+### version
+```{r}
+sessionInfo()
+```
+
+
+### Reference 
+
+1. [Two-Way ANOVA Test in R](http://www.sthda.com/english/wiki/two-way-anova-test-in-r#two-way-anova-test-hypotheses)
+

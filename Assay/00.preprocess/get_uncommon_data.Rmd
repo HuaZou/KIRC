@@ -1,0 +1,183 @@
+---
+title: "Obtain the uncommon data for validation"
+date: "Created: 2021-01-30; updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+### Introduction
+
+All the uncommon data will be used for validation of the model
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(data.table)
+library(impute)
+
+rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+```
+
+
+### load phenotype
+```{r}
+phen <- fread("../../Result/phenotype/all_survival_data.tsv")
+com_phen <- fread("../../Result/phenotype/common_survival_data.tsv")
+
+prof <- fread("../../Study/RawData/1080samples_expression_rawdata.txt")
+```
+
+
+### curation
+
+#### get the uncommon samples information
+```{r}
+uncom_phen <- phen %>% filter(!Barcode%in%com_phen$Barcode)
+```
+
+
+
+#### filter expression matrix
+
+* First, the biological features (e.g. genes/miRNAs) were removed if having zero value in more than 20% of patients. 
+
+* The samples were removed if missing across more than 20% features. 
+
+* Then we used impute function from R impute package, to fill out the missing values. 
+
+* Lastly, we removed input features with zero values across all samples.
+
+```{r}
+get_profile <- function(profile    = prof,
+                        metadata   = uncom_phen,
+                        occurrence = 0.2,
+                        present    = 0.2){
+  # profile    = prof
+  # metadata   = uncom_phen
+  # occurrence = 0.2
+  # present    = 0.2
+  
+  colnames(profile) <- c(colnames(profile)[1:3], gsub("-", "_", colnames(profile)[4:ncol(profile)]))
+  
+  sid <- intersect(uncom_phen$Barcode, colnames(profile))
+  datprf <- profile %>% dplyr::select(c(colnames(profile)[1:3], sid))
+
+  filter_fill_fun <- function(tag){
+    
+    # tag = data_type[1]
+    
+    dat <- datprf %>% filter(Platform == tag) %>%
+                dplyr::select(-c("Platform", "Description"))
+    # feature occurrence
+    feature_occ <- apply(dat[, -1], 1, function(x){sum(x[!is.na(x)] != 0)/length(x)}) %>% 
+      data.frame() %>% 
+      setNames("feature_occurrence") %>%
+      mutate(GeneSymbol = dat$GeneSymbol)
+    remain_feature <- feature_occ %>% filter(feature_occurrence > occurrence)
+    
+    # sample occurrence 
+    sample_occ <- apply(dat[, -1], 2, function(x){sum(x[!is.na(x)] != 0)/length(x)}) %>% 
+      data.frame() %>% 
+      setNames("sample_occurrence") %>%
+      rownames_to_column("sample")
+    remain_sample <- sample_occ %>% filter(sample_occurrence > present)
+    
+    # remove duplicate features
+    dat.cln <- dat %>% filter(GeneSymbol%in%as.character(remain_feature$GeneSymbol)) %>%
+      dplyr::select(c("GeneSymbol", as.character(remain_sample$sample))) 
+    dat.cln$median <- apply(dat.cln[, -1], 1, median)
+    dat.cln <- with(dat.cln, dat.cln[order(GeneSymbol, median, decreasing = T), ])
+    dat.symbol <- dat.cln[!duplicated(dat.cln$GeneSymbol), ] %>%
+      dplyr::select(-median) %>% 
+      column_to_rownames("GeneSymbol")
+    
+    # impute.knn 
+    set.seed(12345)
+    saved.state <- .Random.seed
+    dat.imputed <- impute.knn(as.matrix(dat.symbol))
+    
+    return(dat.imputed)    
+  }
+  
+  data_type <- unique(datprf$Platform)
+  #print(data_type)
+  copyNumber <- filter_fill_fun(data_type[1])
+  geneExp <- filter_fill_fun(data_type[2])
+  methylation <- filter_fill_fun(data_type[3])
+  protein_RPPA <- filter_fill_fun(data_type[4])
+  
+  copyNumber_prf <- copyNumber$data
+  geneExp_prf <- geneExp$data
+  methylation_prf <- methylation$data
+  protein_RPPA_prf <- protein_RPPA$data
+  
+  metadata_cln <- metadata %>% filter(Barcode%in%sid)
+  
+  res <- list(meta = metadata_cln,
+              CN = copyNumber_prf,
+              GE = geneExp_prf,
+              ML = methylation_prf,
+              PR = protein_RPPA_prf)
+  
+  return(res)
+}
+
+data_trim_res <- get_profile(profile = prof,
+                             metadata = uncom_phen)
+```
+
+
+### output
+```{r}
+dir_prf <- "../../Result/profile"
+if(!dir.exists(dir_prf)){
+  dir.create(dir_prf)
+}
+
+# copyNumber
+copyNumber.path <- paste(dir_prf, "uncommon_copyNumber_filter.tsv", sep = "/")
+write.table(data_trim_res$CN, file = copyNumber.path, quote = F, sep = "\t")
+
+# geneExp
+geneExp.path <- paste(dir_prf, "uncommon_geneExp_filter.tsv", sep = "/")
+write.table(data_trim_res$GE, file = geneExp.path, quote = F, sep = "\t")
+
+# methylation
+methylation.path <- paste(dir_prf, "uncommon_methylation_filter.tsv", sep = "/")
+write.table(data_trim_res$ML, file = methylation.path, quote = F, sep = "\t")
+
+# protein_RPPA
+protein_RPPA.path <- paste(dir_prf, "uncommon_protein_RPPA_filter.tsv", sep = "/")
+write.table(data_trim_res$PR, file = protein_RPPA.path, quote = F, sep = "\t")
+
+
+dir_phe <- "../../Result/phenotype"
+if(!dir.exists(dir_phe)){
+  dir.create(dir_phe)
+}
+
+
+# total 
+uncommon_survival.path <- paste(dir_phe, "uncommon_survival_data.tsv", sep = "/")
+write.table(data_trim_res$meta, file = uncommon_survival.path, quote = F, sep = "\t", row.names = F)
+```
+
+
+### version
+```{r}
+sessionInfo()
+```
+
+
+### Reference 
+
+1. [TCGA数据下载整理问题](https://www.jianshu.com/p/a2dd6cb7ab13)
+
+1. [fill out the missing values](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2432074/)

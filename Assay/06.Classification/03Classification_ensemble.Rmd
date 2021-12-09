@@ -1,0 +1,498 @@
+---
+title: "Classification: Building an ensemble of machine learning algorithm"
+date: "Created: 2021-01-20; updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(data.table)
+library(caret)
+library(pROC)
+
+rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+
+grp <- c("S1", "S2")
+grp.col <- c("#6C326C", "#77A2D1")
+```
+
+### Introduction
+
+Ensembles combining Model Predictions including three most popular methods bagging, boosting and stacking algorithm Into Ensemble Predictions can give you a boost in accuracy on your dataset.
+
+* Machine Learning Algorithm
+
+  * Bayesian (Stacking)
+  
+  * RandomForest (Bagging)
+  
+  * Logistic Regression (Stacking)
+  
+  * Support Vector Machines (Stacking)
+  
+  * Stochastic Gradient Boosting (Boosting)
+
+### load data 
+
+* 4-omics data 
+
+* Copy Number: copyNumber
+
+* gene Expression: geneExp
+
+* DNA methylation: methylation
+
+* Reverse Phase Protein Arrays: protein_RPPA
+
+```{r}
+phen <- fread("../../Result/phenotype/phenotype_cluster.csv")
+all_norm <- fread("../../Result/classification/all_top_feature_norm.csv")
+copyNumber_norm <- fread("../../Result/classification/copyNumber_top_feature_norm.csv")
+geneExp_norm <- fread("../../Result/classification/geneExp_top_feature_norm.csv")
+methylation_norm <- fread("../../Result/classification/methylation_top_feature_norm.csv")
+protein_RPPA_norm <- fread("../../Result/classification/protein_RPPA_top_feature_norm.csv")
+```
+
+
+### Data Splitting & build model based on different algorithms
+
+The alternative parameters for dataset and algorithm in this function 
+```{r}
+### build model
+build_model_fun <- function(dataset=all_norm,
+                            algorithm="SVM"){
+  
+  # dataset=all_norm
+  # algorithm="SVM"
+  
+  set.seed(123)
+  mdat <- dataset %>% mutate(Cluster=factor(Cluster, levels = grp)) %>% 
+    column_to_rownames("V1")   
+  index <- createDataPartition(mdat$Cluster, p = 0.8, list = F)
+  trainData_all <- mdat[index, ] 
+  testData_all <- mdat[-index, ]
+  
+  trainData <- trainData_all %>% dplyr::select(colnames(phen)[2], colnames(mdat)[-c(1:11)]) 
+  testData <- testData_all %>% dplyr::select(colnames(phen)[2], colnames(mdat)[-c(1:11)])  
+  
+  # set parameters for model
+  myControl <- trainControl(method = "repeatedcv", 
+                           number = 10,
+                           repeats = 3,
+                           search = "grid",
+                           classProbs = TRUE,
+                           savePredictions = TRUE,
+                           verboseIter = FALSE)  
+  
+  metrics <- "Accuracy"
+  
+  if(algorithm == "all"){
+    
+    algorithmList  <- c("svmRadial", "rf", "gbm", "LogitBoost", "nb")
+    set.seed(123)
+    require(caretEnsemble)
+    fit <-  caretList(Cluster ~ ., data = trainData, 
+                      methodList = algorithmList , 
+                      trControl = myControl, 
+                      metric = metrics,
+                      verbose = FALSE) 
+  }else{
+    if(algorithm == "svmRadial"){        # Support Vector Machines with Radial Basis Function Kernel
+      myGrid <- expand.grid(sigma = seq(0.01, 0.1, 0.02),
+                            C = seq(0, 2, length = 10))
+      # new_algorithm <- getModelInfo()$lssvmLinear
+      # new_algorithm$fit <- function(x, y, wts, param, lev, last, classProbs, ...) {
+      #   kernlab::lssvm(x = as.matrix(x), y = y,
+      #                  tau = param$tau)}
+      new_algorithm <- "svmRadial"
+    }else if(algorithm == "rf"){         # random forest 
+      myGrid <- expand.grid(.mtry=c(sqrt(ncol(trainData)-1)))
+      new_algorithm <- "rf"   
+    }else if(algorithm == "LogitBoost"){ # Boosted Logistic Regression
+      myGrid <- expand.grid(nIter  = 500)
+      new_algorithm <- "LogitBoost"     
+    }else if(algorithm == "gbm"){        # Stochastic Gradient Boosting
+      myGrid <- expand.grid(interaction.depth = c(1, 5, 9),  
+                            n.trees = seq(1, 30, 4)*50,
+                            shrinkage = 0.1,
+                            n.minobsinnode = 20) 
+      new_algorithm <- "gbm" 
+    }else if(algorithm == "nb"){      # naive_bayes
+      myGrid <- expand.grid(fL=c(0,0.5,1.0), 
+                            usekernel = TRUE, 
+                            adjust=c(0,0.5,1.0)) 
+      new_algorithm <- "nb"     
+    }
+    set.seed(123)
+    fit <- train(Cluster ~ ., data = trainData, 
+                 method = new_algorithm, 
+                 trControl = myControl, 
+                 tuneGrid = myGrid,
+                 metric = metrics,
+                 verbose = TRUE) 
+  pred <- predict(fit, newdata=testData)
+  print(confusionMatrix(pred, testData$Cluster))
+  }
+  
+  res <- list(tData_all=testData_all, tData=testData, model=fit)
+  return(res)
+} 
+
+### get ensembles model
+get_ensemble_model <- function(model_fit=protein_RPPA_model_ensemble,
+                               algorithm="svmRadial"){
+  
+  # model_fit=protein_RPPA_model_ensemble
+  # algorithm="svmRadial"
+  
+  stackControl <- trainControl(method="repeatedcv", 
+                               number=10, 
+                               repeats=3, 
+                               savePredictions=TRUE, 
+                               classProbs=TRUE,
+                               verboseIter = FALSE)
+  set.seed(123)
+  stack_fit <- caretStack(model_fit$model, 
+                          method=algorithm, 
+                          metric="Accuracy", 
+                          trControl=stackControl)
+  
+  pred <- predict(stack_fit, newdata=model_fit$tData)
+  print(confusionMatrix(pred, model_fit$tData$Cluster))
+  
+  res <- list(tData_all=model_fit$tData_all, tData=model_fit$tData, model=stack_fit)  
+  return(res)
+}
+
+
+### ROC/AUC
+ROC_fun <- function(model_fit=protein_RPPA_model_stack){
+  
+  #model_fit=protein_RPPA_model_stack
+  
+  fit <- model_fit$model
+  tData <- model_fit$tData
+  
+  predicted <- predict(fit, newdata = tData, type = "prob")
+  rocobj <- roc(tData$Cluster, predicted)
+  #ggroc(roc) 
+  auc <- round(auc(tData$Cluster, predicted),4)
+  plotroc <- tibble(tpr = rocobj$sensitivities,
+                     fpr = 1 - rocobj$specificities)
+  plroc <- ggplot(data = plotroc, aes(x=fpr, y=tpr))+
+              geom_path(color="black", size = 1)+
+              geom_abline(intercept = 0, slope = 1, color="grey", size = 1, linetype=2)+
+              labs(x = "False Positive Rate (1 - Specificity)",
+                   y = "True Positive Rate (Sensivity or Recall)")+
+              annotate("text",x = .75, y = .25,label=paste("AUC =", auc),
+                       size = 5, family="serif")+
+              coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))+
+              theme_bw()+
+              theme(panel.background = element_rect(fill = 'transparent'),
+                    axis.ticks.length = unit(0.4, "lines"), 
+                    axis.ticks = element_line(color='black'),
+                    axis.line = element_line(size=.5, colour = "black"),
+                    axis.title = element_text(colour='black', size=12,face = "bold"),
+                    axis.text = element_text(colour='black',size=10,face = "bold"),
+                    text = element_text(size=8, color="black", family="serif"))
+  return(plroc)  
+}
+
+### Evaluation
+Evaluation_fun <- function(model_fit=protein_RPPA_model_stack){
+  
+  # model_fit=protein_RPPA_model_stack
+  
+  fit <- model_fit$model
+  tData <- model_fit$tData
+  tData_all <- model_fit$tData_all
+  
+  pred <- predict(fit, newdata=tData)
+  
+  # test Data
+  testData_new <- data.frame(SampleID=rownames(tData),
+                             Predict_Cluster=pred) %>%
+    inner_join(tData_all %>% rownames_to_column("SampleID"),
+               by = "SampleID") %>%
+    dplyr::select(SampleID, Cluster, Predict_Cluster, OS, OS.Time) %>%
+    na.omit()
+
+  # Concordance index
+  Concordance_index_fun <- function(dataset=testData_new, 
+                                    group_name="Cluster"){
+    # dataset=testData_new
+    # group_name="Cluster"
+    
+    require(survcomp)
+    colnames(dataset)[which(colnames(dataset) == group_name)] <- "Group"
+    
+    ci_res <- with(dataset, concordance.index(x=Group, surv.time=OS.Time, surv.event=OS, 
+                      method="noether"))  
+    
+    res <- data.frame(Type=group_name,
+                       C_index=signif(ci_res$c.index, 3),
+                       pvalue=ci_res$p.value,
+                       se=signif(ci_res$se, 3),
+                       odd=with(ci_res, paste0("[", signif(lower, 3), ", ", signif(upper, 3), "]")))
+    
+    return(res)
+  }
+  Cluster_ci <- Concordance_index_fun(dataset=testData_new, group_name="Cluster")
+  Predict_Cluster_ci <- Concordance_index_fun(dataset=testData_new, group_name="Predict_Cluster")
+  ci_res <- rbind(Cluster_ci, Predict_Cluster_ci)
+  #DT::datatable(ci_res)
+
+  # Log-rank p-value of Cox-PH regression
+  Log_rank_fun <- function(dataset=testData_new, 
+                           group_name="Cluster"){
+    # dataset=testData_new
+    # group_name="Cluster"
+    
+    require(survival)
+    require(survminer)
+    colnames(dataset)[which(colnames(dataset) == group_name)] <- "Group"
+    cox <- coxph(Surv(OS.Time, OS) ~ Group, data = dataset) 
+    tmp <- summary(cox)
+    tmp.wald <- data.frame(t(tmp$waldtest)) %>%
+          setNames(c("Wald_test", "Wald_df", "Wald_pvlaue"))
+    tmp.lg <- data.frame(t(tmp$logtest)) %>%
+          setNames(c("lg_rank", "lg_rank_df", "lg_rank_pvlaue"))
+    tmp.total <- cbind(tmp.wald, tmp.lg) 
+      
+    pvalue <- paste(paste0("Log-Rank P=", signif(tmp.lg$lg_rank_pvlaue, 3)), 
+                    paste0("Cox P=", signif(tmp.wald$Wald_pvlaue, 3)), sep = "\n")
+    factors <- levels(dataset$Group)
+    surv_fit <- survfit(Surv(OS.Time, OS) ~ Group, data = dataset)
+    
+    sur_pl <- ggsurvplot(surv_fit,
+               data = dataset,  
+               surv.median.line = "hv",
+               add.all = TRUE,
+               palette = "aaas",
+               risk.table = TRUE, 
+               xlab = "Follow up time(Years)", 
+               legend = c(0.8, 0.2), 
+               legend.title = "",
+               legend.labs = c("all", factors), 
+               break.x.by = 2,
+               font.legend = c(10, "italic"),
+               ggtheme = theme_bw())
+    sur_pl$plot <- sur_pl$plot + 
+               annotate("text", x=3, y=0.2, label=pvalue)
+      
+    pl <- cowplot::plot_grid(sur_pl$plot, sur_pl$table, 
+                             ncol = 1, align = "hv", 
+                             rel_heights = c(2, 1))
+      
+    pval <- data.frame(Type=group_name,
+                             tmp.total)
+    res <- list(plot=pl, pvalue=pval)
+    return(res)
+  }
+  
+  Cluster_surv <- Log_rank_fun(dataset=testData_new, group_name="Cluster")
+  Predict_Cluster_surv <- Log_rank_fun(dataset=testData_new, group_name="Predict_Cluster")
+  surv_res <- rbind(Cluster_surv$pvalue, Predict_Cluster_surv$pvalue)
+  #DT::datatable(surv_res)
+
+  surv_pl <- cowplot::plot_grid(Cluster_surv$plot, Predict_Cluster_surv$plot,
+                     ncol = 2, align = "hv", labels = c("Actual", "Predict"))
+    
+  # Brier score
+  Brier_score_fun <- function(dataset=testData_new, 
+                              group_name="Cluster"){
+    # dataset=testData_new
+    # group_name="Cluster"
+    
+    require(survcomp)
+    colnames(dataset)[which(colnames(dataset) == group_name)] <- "Group"
+    
+    dat <- dataset %>% dplyr::select(c("Group", "OS", "OS.Time")) %>%
+      setNames(c("score", "event", "time"))
+    bsc <- sbrier.score2proba(data.tr=dat, data.ts=dat, method="cox")  
+    
+    res <- list(res_dat=dat, res_bsc=bsc)
+    return(res)
+  }
+  
+  Cluster_bsc <- Brier_score_fun(dataset=testData_new, group_name="Cluster")
+  Predict_Cluster_bsc <- Brier_score_fun(dataset=testData_new, group_name="Predict_Cluster")
+  
+  # if(!all(Cluster_bsc$res_dat$time == Predict_Cluster_bsc$res_dat$time)) {
+  #   stop("the two vector of BSCs must be computed for the same points in time!") 
+  # }
+  # ibsc.comp(bsc1=Cluster_bsc$res_bsc$bsc, 
+  #           bsc2=Predict_Cluster_bsc$res_bsc$bsc, time=Cluster_bsc$res_dat$time)  
+  
+  bsc_res <- data.frame(Type=c("Actual", "Predict"),
+                        Brier_score=c(Cluster_bsc$res_bsc$bsc.integrated,
+                                      Predict_Cluster_bsc$res_bsc$bsc.integrated))
+  
+  res <- list(ci_res=ci_res, surv_res=surv_res, bsc_res=bsc_res)
+  return(res)
+}
+```
+
+
+### 4 omics-data
+```{r}
+# ensemble
+all_model_ensemble <- build_model_fun(algorithm = "all", dataset = all_norm)
+summary(resamples(all_model_ensemble$model))
+dotplot(resamples(all_model_ensemble$model))
+modelCor(resamples(all_model_ensemble$model))
+
+# best models
+all_model_stack <- get_ensemble_model(model_fit = all_model_ensemble, algorithm = "svmRadial")
+
+# ROC/AUC 
+all_ROC_stack <- ROC_fun(model_fit = all_model_stack)
+all_ROC_stack
+
+# evaluation index 
+all_Evaluation_stack <- Evaluation_fun(model_fit = all_model_stack)
+all_Evaluation_stack
+
+# saving model 
+if(!dir.exists("../../Result/classification/model")){
+  dir.create("../../Result/classification/model", recursive = T)
+}
+save(all_model_ensemble, all_model_stack, all_ROC_stack, all_Evaluation_stack, 
+     file = "../../Result/classification/model/all_ensemble.RData")
+```
+
+### copyNumber
+```{r}
+# ensemble
+copyNumber_model_ensemble <- build_model_fun(algorithm = "all", dataset = copyNumber_norm)
+summary(resamples(copyNumber_model_ensemble$model))
+dotplot(resamples(copyNumber_model_ensemble$model))
+modelCor(resamples(copyNumber_model_ensemble$model))
+
+# best models
+copyNumber_model_stack <- get_ensemble_model(model_fit = copyNumber_model_ensemble, algorithm = "svmRadial")
+
+# ROC/AUC 
+copyNumber_ROC_stack <- ROC_fun(model_fit = copyNumber_model_stack)
+copyNumber_ROC_stack
+
+# evaluation index 
+copyNumber_Evaluation_stack <- Evaluation_fun(model_fit = copyNumber_model_stack)
+copyNumber_Evaluation_stack
+
+# saving model 
+if(!dir.exists("../../Result/classification/model")){
+  dir.create("../../Result/classification/model", recursive = T)
+}
+save(copyNumber_model_ensemble, copyNumber_model_stack, copyNumber_ROC_stack, copyNumber_Evaluation_stack, 
+     file = "../../Result/classification/model/copyNumber_ensemble.RData")
+```
+
+
+### geneExp
+```{r}
+# ensemble
+geneExp_model_ensemble <- build_model_fun(algorithm = "all", dataset = geneExp_norm)
+summary(resamples(geneExp_model_ensemble$model))
+dotplot(resamples(geneExp_model_ensemble$model))
+modelCor(resamples(geneExp_model_ensemble$model))
+
+# best models
+geneExp_model_stack <- get_ensemble_model(model_fit = geneExp_model_ensemble, algorithm = "svmRadial")
+
+# ROC/AUC 
+geneExp_ROC_stack <- ROC_fun(model_fit = geneExp_model_stack)
+geneExp_ROC_stack
+
+# evaluation index 
+geneExp_Evaluation_stack <- Evaluation_fun(model_fit = geneExp_model_stack)
+geneExp_Evaluation_stack
+
+# saving model 
+if(!dir.exists("../../Result/classification/model")){
+  dir.create("../../Result/classification/model", recursive = T)
+}
+save(geneExp_model_ensemble, geneExp_model_stack, geneExp_ROC_stack, geneExp_Evaluation_stack, 
+     file = "../../Result/classification/model/geneExp_ensemble.RData")
+```
+
+
+### methylation
+```{r}
+# ensemble
+methylation_model_ensemble <- build_model_fun(algorithm = "all", dataset = methylation_norm)
+summary(resamples(methylation_model_ensemble$model))
+dotplot(resamples(methylation_model_ensemble$model))
+modelCor(resamples(methylation_model_ensemble$model))
+
+# best models
+methylation_model_stack <- get_ensemble_model(model_fit = methylation_model_ensemble, algorithm = "svmRadial")
+
+# ROC/AUC 
+methylation_ROC_stack <- ROC_fun(model_fit = methylation_model_stack)
+methylation_ROC_stack
+
+# evaluation index 
+methylation_Evaluation_stack <- Evaluation_fun(model_fit = methylation_model_stack)
+methylation_Evaluation_stack
+
+# saving model 
+if(!dir.exists("../../Result/classification/model")){
+  dir.create("../../Result/classification/model", recursive = T)
+}
+save(methylation_model_ensemble, methylation_model_stack, methylation_ROC_stack, methylation_Evaluation_stack, 
+     file = "../../Result/classification/model/methylation_ensemble.RData")
+```
+
+
+### protein_RPPA
+```{r}
+# ensemble
+protein_RPPA_model_ensemble <- build_model_fun(algorithm = "all", dataset = protein_RPPA_norm)
+summary(resamples(protein_RPPA_model_ensemble$model))
+dotplot(resamples(protein_RPPA_model_ensemble$model))
+modelCor(resamples(protein_RPPA_model_ensemble$model))
+
+# best models
+protein_RPPA_model_stack <- get_ensemble_model(model_fit = protein_RPPA_model_ensemble, algorithm = "svmRadial")
+
+# ROC/AUC 
+protein_RPPA_ROC_stack <- ROC_fun(model_fit = protein_RPPA_model_stack)
+protein_RPPA_ROC_stack
+
+# evaluation index 
+protein_RPPA_Evaluation_stack <- Evaluation_fun(model_fit = protein_RPPA_model_stack)
+protein_RPPA_Evaluation_stack
+
+# saving model 
+if(!dir.exists("../../Result/classification/model")){
+  dir.create("../../Result/classification/model", recursive = T)
+}
+save(protein_RPPA_model_ensemble, protein_RPPA_model_stack, protein_RPPA_ROC_stack, protein_RPPA_Evaluation_stack, 
+     file = "../../Result/classification/model/protein_RPPA_ensemble.RData")
+```
+
+
+
+### version
+```{r}
+sessionInfo()
+```
+
+
+### Reference 
+
+
+1. [how to build an ensemble of machine learning algorithm in R](https://machinelearningmastery.com/machine-learning-ensembles-with-r/)
+
+2. [ROC curve by ggplot2](https://www.statology.org/roc-curve-ggplot2/)
+

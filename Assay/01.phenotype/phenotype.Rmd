@@ -1,0 +1,189 @@
+---
+title: "Phenotype"
+date: "Created: 2021-01-06; updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(survival)
+library(survminer)
+library(data.table)
+library(stringr)
+
+rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+```
+
+
+### load phenotype
+```{r}
+survival_data <- fread("../../Result/phenotype/common_survival_data.tsv")
+```
+
+
+### clinical parameters
+```{r}
+get_clinical <- function(x){
+  
+  
+  dat_clin <- x
+  # pathologic_T 
+  dat_clin$Te1 <- str_extract(dat_clin$TNM, "T\\d[a-z]+")
+  dat_clin$Te2 <- str_extract(dat_clin$TNM, "T\\d")
+  dat_clin$Te1 <- with(dat_clin, ifelse(is.na(Te1), Te2, Te1))
+  # table(dat_clin$Te1)
+  # table(dat_clin$Te2)
+  dat_clin$Te2[dat_clin$Te2 == "T1"] <- "T1-T2"
+  dat_clin$Te2[dat_clin$Te2 == "T2"] <- "T1-T2"
+  dat_clin$Te2[dat_clin$Te2 == "T3"] <- "T1-T2"
+  dat_clin$Te2[dat_clin$Te2 == "T4"] <- "T3-T4"
+  Te2 <- table(dat_clin$Te2)
+  
+  # pathologic_N
+  dat_clin$N <- str_extract(dat_clin$TNM, "N\\d")
+  dat_clin$N <- str_extract(dat_clin$N, "\\d")
+  # table(dat_clin$N)
+  
+  dat_clin$N[dat_clin$N == "0"] <- "NO"
+  dat_clin$N[dat_clin$N == "1"] <- "Yes"
+  dat_clin$N[dat_clin$N == "2"] <- "Yes"
+  dat_clin$N[dat_clin$N == "3"] <- "Yes"
+  N <- table(dat_clin$N)
+  
+  # pathologic_M
+  dat_clin$M <- str_extract(dat_clin$TNM, "M\\d")
+  dat_clin$M <- str_extract(dat_clin$M, "\\d")
+  # table(dat_clin$M)
+  
+  dat_clin$M[dat_clin$M == "0"] <- "NO"
+  dat_clin$M[dat_clin$M == "1"] <- "Yes"
+  M <- table(dat_clin$M)
+  
+  # Age
+  dat_clin$Age <- ifelse(dat_clin$Age > 60, "old", "young")
+  Age <- table(dat_clin$Age)
+  
+  # Gender
+  dat_clin$Gender <- ifelse(dat_clin$Gender == "MALE", "Male", "Female")
+  Gender <- table(dat_clin$Gender)
+  
+  # stage
+  dat_clin$Stage1 <- str_trim(str_extract(dat_clin$Stage, "\\s[H-Z]+"),
+                              side = c("both", "left", "right"))
+  # table(dat_clin$Stage1)
+  dat_clin$Stage1[dat_clin$Stage1 == "I"] <- "Stage I-II"
+  dat_clin$Stage1[dat_clin$Stage1 == "II"] <- "Stage I-II"
+  dat_clin$Stage1[dat_clin$Stage1 == "III"] <- "Stage III-IV"
+  dat_clin$Stage1[dat_clin$Stage1 == "IV"] <- "Stage III-IV"
+  Stage <- table(dat_clin$Stage1)
+  
+  dat_cal <- data.frame(Clinicopathological=c(
+                          rep("Age", length(Age)),
+                          rep("Gender", length(Gender)),
+                          rep("Stage", length(Stage)),
+                          rep("T", length(Te2)),
+                          rep("N", length(N)),
+                          rep("M", length(M))), 
+                        Name = c(names(Age), names(Gender), 
+                                 names(Stage), names(Te2),
+                                 names(N), names(M)),
+                        Number = c(as.numeric(Age), as.numeric(Gender), 
+                                 as.numeric(Stage), as.numeric(Te2),
+                                 as.numeric(N), as.numeric(M))
+                        )
+  return(dat_cal)  
+}
+
+DT::datatable(get_clinical(survival_data))
+```
+
+
+### curation
+```{r}
+get_plot <- function(dat=survival_data, tag="Gender"){
+  
+  # dat=survival_data
+  # tag="Gender"
+  
+  # pvalue
+  colnames(dat)[which(colnames(dat) == tag)] <- "group_info"
+  dat$group_info <- factor(dat$group_info)
+  factors <- unique(as.character(dat$group_info))
+  
+  cox <- coxph(Surv(OS.Time, OS) ~ group_info, data = dat)
+  tmp <- summary(cox)
+  tmp.wald <- data.frame(t(tmp$waldtest)) %>%
+        setNames(c("Wald_test", "Wald_df", "Wald_pvlaue"))
+  tmp.lg <- data.frame(t(tmp$logtest)) %>%
+        setNames(c("lg_rank", "lg_rank_df", "lg_rank_pvlaue"))
+  tmp.total <- cbind(tmp.wald, tmp.lg) 
+  
+  pvalue <- paste(paste0("Log-Rank P=", signif(tmp.lg$lg_rank_pvlaue, 3)), 
+                  paste0("Cox P=", signif(tmp.wald$Wald_pvlaue, 3)), sep = "\n")
+  
+  # plot
+  fit <- survfit(Surv(OS.Time, OS) ~ group_info, data = dat)
+  info <- data.frame(time = fit$time,
+                  n.risk = fit$n.risk,
+                  n.event = fit$n.event,
+                  n.censor = fit$n.censor,
+                  surv = fit$surv,
+                  upper = fit$upper,
+                  lower = fit$lower)
+  
+  pl <- ggsurvplot(fit,
+             data = dat,  
+             surv.median.line = "hv",
+             add.all = TRUE,
+             palette = "aaas",
+             risk.table = TRUE, 
+             xlab = "Follow up time(Years)", 
+             legend = c(0.8, 0.2), 
+             legend.title = "",
+             legend.labs = c("all", factors), 
+             break.x.by = 2,
+             font.legend = c(10, "italic"),
+             ggtheme = theme_bw())
+  pl$plot <- pl$plot + 
+             annotate("text", x=3, y=0.2, label=pvalue)
+  
+  res <- list(info=info, pl=pl)
+  return(res)
+}
+```
+
+
+### plot
+```{r}
+# gender 
+gender_plot <- get_plot(tag = "Gender")
+gender_plot$pl
+
+# stage 
+stage_plot <- get_plot(tag = "Stage")
+stage_plot$pl
+```
+
+
+### version
+```{r}
+sessionInfo()
+```
+
+
+### Reference 
+
+1. [解决生存分析和临床参数相关分析](https://www.jianshu.com/p/9cc986dcf285)
+
+2. [怎么处理生存时间为0的样本](https://www.biostars.org/p/153013/)
+

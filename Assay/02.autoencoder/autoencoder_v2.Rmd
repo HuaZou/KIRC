@@ -1,0 +1,106 @@
+---
+title: "autoencoder vi ANN2 package"
+date: "Created: 2021-01-27; updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(data.table)
+library(ANN2)
+
+rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+```
+
+
+## Introduction
+
+Artificial Neural Networks package for R. We performed autoencoder algorithm by this packages via *autoencoder* function
+
+
+### load data 
+
+* Copy Number: copyNumber
+
+* gene Expression: geneExp
+
+* DNA methylation: methylation
+
+* Reverse Phase Protein Arrays: protein_RPPA
+
+```{r}
+phen <- fread("../../Result/phenotype/common_survival_data.tsv")
+
+copyNumber <- fread("../../Result/profile/copyNumber_filter.tsv")
+geneExp <- fread("../../Result/profile/geneExp_filter.tsv")
+methylation <- fread("../../Result/profile/methylation_filter.tsv")
+protein_RPPA <- fread("../../Result/profile/protein_RPPA_filter.tsv")
+```
+
+
+### deal with data for the input data of autoencoder(relabel the features)
+```{r}
+get_profile <- function(dataset=copyNumber, tag="copyNumber"){
+  
+  # dataset=copyNumber
+  # tag="copyNumber"  
+  
+  res <- dataset %>% mutate(Type=tag) %>%
+    mutate(Name=paste(V1, Type, sep = "_")) %>%
+    dplyr::select(Name, V1, Type, everything()) %>%
+    dplyr::select(-c("V1", "Type")) %>%
+    column_to_rownames("Name") %>%
+    t() %>% data.frame() %>%
+    rownames_to_column("SampleID")  
+  
+  return(res)
+}
+
+copyNumber_cln <- get_profile(dataset=copyNumber, tag="copyNumber")
+geneExp_cln <- get_profile(dataset=geneExp, tag="geneExp") 
+methylation_cln <- get_profile(dataset=methylation, tag="methylation")
+protein_RPPA_cln <- get_profile(dataset=protein_RPPA, tag="protein_RPPA") 
+
+require(plyr)
+mdat <- join_all(list(copyNumber_cln, geneExp_cln, 
+                      methylation_cln, protein_RPPA_cln), 
+                 by='SampleID', type='left') %>%
+  column_to_rownames("SampleID")
+```
+
+### autoencoder
+```{r}
+# Prepare test and train sets
+random_idx <- sample(1:nrow(mdat), size = (nrow(mdat)*0.8))
+X_train    <- mdat[random_idx, ]
+X_test     <- mdat[setdiff(1:nrow(mdat), random_idx), ]
+
+# Define and train autoencoder
+AE <- autoencoder(X = X_train,
+                  hidden.layers = c(500, 100, 500),
+                  loss.type = 'pseudo-huber',
+                  optim.type = 'adam',
+                  n.epochs = 5000)
+
+# Reconstruct test data
+reconstruct(AE, X_test)
+
+
+# Plot original points (grey) and reconstructions (colored) for training data
+reconstruction_plot(AE, X_train)
+```
+
+
+### version
+```{r}
+sessionInfo()
+```

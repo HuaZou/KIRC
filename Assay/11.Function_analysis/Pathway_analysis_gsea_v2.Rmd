@@ -1,0 +1,363 @@
+---
+title: "Enriched pathway analysis: based on cluterProfiler and enrichplot"
+date: "Created: 2021-01-28 Updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+## Introduction
+
+Performing Enriched pathway analysis via **clusterProfiler** and **enrichplot** package based on the DESeq2 results
+
+* *clusterProfiler* calculates the enrichment score
+
+* *enrichplot* displays the enrichment result
+
+Two approaches for enrichment analysis:
+
+* Over Representation Analysis: the up- or down-regulated DEGs 
+
+* Gene Set Enrichment Analysis: All the ranked DEGs
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(data.table)
+library(clusterProfiler)
+# library(enrichplot)
+library(patchwork)
+
+rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+
+grp <- c("S1", "S2")
+grp.col <- c("#6C326C", "#77A2D1")
+```
+
+
+### load data 
+
+* gene Expression DESeq2 object
+```{r}
+phen <- fread("../../Result/phenotype/phenotype_cluster.csv")
+geneExp <- readRDS("../../Result/Differential/geneExp_Diff.RDS")
+```
+
+
+### Curation Function 
+
+* Over Representation Analysis: the DEgenes vectors (up or down)
+
+* Gene Set Enrichment Analysis: all the ranked genes by statistics
+```{r}
+# ORA 
+get_ORA <- function(dataset=geneExp$diff_res,
+                    group=grp[1],
+                    type="kegg"){
+  
+  # dataset=geneExp$diff_res
+  # group=grp[1]
+  # type="kegg"
+  
+  # extract DEGs
+  dat <- dataset %>% data.frame() %>%
+    rownames_to_column("SYMBOL") %>%
+    filter(Enrichment%in%group) %>%
+    distinct() %>%
+    arrange(log2FoldChange)
+  
+  # transform geneid
+  require(org.Hs.eg.db)
+  symbol2entrz <- AnnotationDbi::select(org.Hs.eg.db,
+                                      key=dat$SYMBOL, 
+                                      columns="ENTREZID",
+                                      keytype="SYMBOL")
+  symbol2entrz <- as_tibble(symbol2entrz)
+
+  dat_v2 <- inner_join(symbol2entrz, dat, by ="SYMBOL") %>%
+    dplyr::select(ENTREZID, log2FoldChange) %>%
+    na.omit() %>% 
+    distinct() %>% 
+    group_by(ENTREZID) %>% 
+    summarize(log2FoldChange=mean(log2FoldChange)) %>%
+    ungroup() %>%
+    arrange(desc(log2FoldChange))
+  
+  geneList <- tibble::deframe(dat_v2)  
+  if(type == "kegg"){
+    es_res <- enrichKEGG(gene          = names(geneList),
+                         organism      = "hsa",
+                         pAdjustMethod = "BH",
+                         pvalueCutoff  = 0.01,
+                         qvalueCutoff  = 0.05)
+  }else if(type == "GO"){
+    es_res <- enrichGO(gene          = names(geneList),
+                       OrgDb         = org.Hs.eg.db,
+                       keyType       = "ENTREZID",
+                       ont           = "CC",
+                       pAdjustMethod = "BH",
+                       pvalueCutoff  = 0.01,
+                       qvalueCutoff  = 0.05)    
+  }
+  
+  res <- list(glist=geneList, es=es_res) 
+  
+  return(res)
+}
+
+# GSEA
+get_GSEA <- function(dataset=geneExp$diff_res,
+                     type="kegg"){
+  
+  # dataset=geneExp$diff_res
+  # type="kegg"
+  
+  dat <- dataset %>% data.frame() %>%
+    rownames_to_column("SYMBOL") 
+  
+  # transform geneid
+  require(org.Hs.eg.db)
+  symbol2entrz <- AnnotationDbi::select(org.Hs.eg.db,
+                                        key=dat$SYMBOL, 
+                                        columns="ENTREZID",
+                                        keytype="SYMBOL")
+  symbol2entrz <- as_tibble(symbol2entrz)
+
+  dat_v2 <- inner_join(symbol2entrz, dat, by ="SYMBOL") %>%
+    dplyr::select(ENTREZID, log2FoldChange) %>%
+    na.omit() %>% 
+    distinct() %>% 
+    group_by(ENTREZID) %>% 
+    summarize(log2FoldChange=mean(log2FoldChange)) %>%
+    ungroup() %>%
+    arrange(desc(log2FoldChange))
+  
+  geneList <- tibble::deframe(dat_v2)
+  require(fgsea)
+  if(type == "kegg"){
+    es_res <- gseKEGG(gene          = geneList,
+                      organism      = "hsa",
+                      keyType       = "kegg",
+                      nPerm         = 1000,
+                      minGSSize     = 10,
+                      maxGSSize     = 500,
+                      pAdjustMethod = "BH",
+                      pvalueCutoff  = 0.05,
+                      by            = "fgsea")
+  }else if(type == "GO"){
+    es_res <- gseGO(gene          = geneList,
+                    OrgDb         = org.Hs.eg.db,
+                    ont           = "CC",
+                    nPerm         = 1000,
+                    minGSSize     = 10,
+                    maxGSSize     = 500,                 
+                    pAdjustMethod = "BH",
+                    pvalueCutoff  = 0.05)    
+  }
+  
+  res <- list(glist=geneList, es=es_res) 
+  
+  return(res)
+}
+
+plot_Escore <- function(dataset=GSEA_kegg,
+                        type="barplot",
+                        number=10,
+                        pathway="Oxidative phosphorylation",
+                        pathid="hsa04110"){
+  # dataset=GSEA_kegg
+  # type="barplot"
+  # number=10
+  # pathway="Oxidative phosphorylation"
+  # pathid="hsa04110"
+  
+  my_theme <- theme(axis.title = element_text(face = 'bold',color = 'black',size = 14),
+                  axis.text = element_text(color = 'black',size = 10),
+                  text = element_text(size = 8, color = "black", family="serif"),
+                  legend.position = 'right',
+                  legend.key.height = unit(0.6,'cm'),
+                  legend.text = element_text(face = "bold", color = 'black',size = 10),
+                  strip.text = element_text(face = "bold", size = 14))
+  
+  edox <- setReadable(dataset$es, 'org.Hs.eg.db', 'ENTREZID')
+  
+  if(type == "barplot"){
+    pl <- barplot(edox, showCategory = number)+
+      my_theme
+  }else if(type == "dotplot"){
+    pl <- enrichplot::dotplot(edox, showCategory=number)+
+      my_theme
+  }else if(type == "network"){
+    pl <- enrichplot::cnetplot(edox, categorySize="pvalue", foldChange=dataset$glist, showCategory = 3)+
+      my_theme
+  }else if(type == "heatmap"){
+    pl <- enrichplot::heatplot(edox, foldChange=dataset$glist, showCategory = number)+
+      my_theme
+  }else if(type == "enrichment"){
+    pl <- enrichplot::emapplot(dataset$es, pie_scale=1.5, layout="kk", showCategory = number)+
+      my_theme
+  }else if(type == "UpSet"){
+    require(ggupset)
+    pl <- enrichplot::upsetplot(dataset$es, n=number)+
+      my_theme
+  }else if(type == "GSEA"){
+    npath <- pmatch(pathway, dataset$es$Description)
+    pl <- enrichplot::gseaplot2(dataset$es, geneSetID = npath, title = dataset$es$Description[npath])+
+      my_theme
+  }else if(type == "pubmed"){
+    terms <- dataset$es$Description[1:number]
+    pl <- enrichplot::pmcplot(terms, 2010:2021, proportion = T)+
+      my_theme
+  }else if(type == "pathview"){
+    require(pathview)
+    pl <- pathview(gene.data  = dataset$glist,
+                   pathway.id = pathid,
+                   species    = "hsa",
+                   limit      = list(gene=max(abs(dataset$glist)), cpd=1))    
+  }
+  return(pl)
+}
+```
+
+
+### Over Representation Analysis
+
+* Calculate the Enrichment results
+```{r}
+# KEGG 
+DEGs_ORA_kegg <- get_ORA(dataset = geneExp$diff_res, group = grp, type = "kegg")
+DEGs_ORA_kegg_S1 <- get_ORA(dataset = geneExp$diff_res, group = grp[1], type = "kegg")
+DEGs_ORA_kegg_S2 <- get_ORA(dataset = geneExp$diff_res, group = grp[2], type = "kegg")
+
+# GO
+DEGs_ORA_GO <- get_ORA(dataset = geneExp$diff_res, group = grp, type = "GO")
+DEGs_ORA_GO_S1 <- get_ORA(dataset = geneExp$diff_res, group = grp[1], type = "GO")
+DEGs_ORA_GO_S2 <- get_ORA(dataset = geneExp$diff_res, group = grp[2], type = "GO")
+
+save(DEGs_ORA_kegg, DEGs_ORA_kegg_S1, DEGs_ORA_kegg_S2, 
+     DEGs_ORA_GO, DEGs_ORA_GO_S1, DEGs_ORA_GO_S2,
+     file = "../../Result/Enrichment/DEGs_ORA_KEGG_GO.RData")
+```
+
+* Visualization : KEGG barplot 
+```{r, fig.width=16, fig.height=8}
+DEGs_ORA_kegg_barplot <- plot_Escore(dataset = DEGs_ORA_kegg, number = 10, type = "barplot")
+DEGs_ORA_kegg_barplot_S1 <- plot_Escore(dataset = DEGs_ORA_kegg_S1, number = 10, type = "barplot")
+DEGs_ORA_kegg_barplot_S2 <- plot_Escore(dataset = DEGs_ORA_kegg_S2, number = 10, type = "barplot")
+
+(DEGs_ORA_kegg_barplot | DEGs_ORA_kegg_barplot_S1 | DEGs_ORA_kegg_barplot_S2)+
+  plot_layout(guides = 'collect')+
+  plot_annotation(tag_levels = "A")
+```
+
+* Visualization : KEGG dotplot
+```{r, fig.width=16, fig.height=8}
+DEGs_ORA_kegg_dotplot <- plot_Escore(dataset = DEGs_ORA_kegg, number = 10, type = "dotplot")
+DEGs_ORA_kegg_dotplot_S1 <- plot_Escore(dataset = DEGs_ORA_kegg_S1, number = 10, type = "dotplot")
+DEGs_ORA_kegg_dotplot_S2 <- plot_Escore(dataset = DEGs_ORA_kegg_S2, number = 10, type = "dotplot")
+
+(DEGs_ORA_kegg_dotplot | DEGs_ORA_kegg_dotplot_S1 | DEGs_ORA_kegg_dotplot_S2)+
+  plot_layout(guides = 'collect')+
+  plot_annotation(tag_levels = "A")
+```
+
+* Visualization : KEGG network
+```{r, fig.width=16, fig.height=12}
+DEGs_ORA_kegg_network <- plot_Escore(dataset = DEGs_ORA_kegg, number = 4, type = "network")
+DEGs_ORA_kegg_network_S1 <- plot_Escore(dataset = DEGs_ORA_kegg_S1, number = 4, type = "network")
+DEGs_ORA_kegg_network_S2 <- plot_Escore(dataset = DEGs_ORA_kegg_S2, number = 4, type = "network")
+
+(DEGs_ORA_kegg_network | DEGs_ORA_kegg_network_S1 | DEGs_ORA_kegg_network_S2)+
+  plot_layout(guides = 'collect')+
+  plot_annotation(tag_levels = "A")
+```
+
+* Visualization : KEGG Enrichment Map
+```{r, fig.width=16, fig.height=12}
+DEGs_ORA_kegg_enrichment <- plot_Escore(dataset = DEGs_ORA_kegg, number = 10, type = "enrichment")
+DEGs_ORA_kegg_enrichment_S1 <- plot_Escore(dataset = DEGs_ORA_kegg_S1, number = 10, type = "enrichment")
+DEGs_ORA_kegg_enrichment_S2 <- plot_Escore(dataset = DEGs_ORA_kegg_S2, number = 10, type = "enrichment")
+
+(DEGs_ORA_kegg_enrichment | DEGs_ORA_kegg_enrichment_S1 | DEGs_ORA_kegg_enrichment_S2)+
+  plot_layout(guides = 'collect')+
+  plot_annotation(tag_levels = "A")
+```
+
+
+### Gene Set Enrichment Analysis
+
+* calculate enrichment score
+```{r, fig.width=15}
+GSEA_kegg <- get_GSEA(dataset = geneExp$diff_res, type = "kegg")
+GSEA_GO <- get_GSEA(dataset = geneExp$diff_res, type = "GO")
+save(GSEA_kegg, GSEA_GO,
+     file = "../../Result/Enrichment/GSEA_KEGG_GO.RData")
+```
+
+* visualization: KEGG dotplot
+```{r}
+GSEA_kegg_dotplot <- plot_Escore(dataset = GSEA_kegg, type = "dotplot", number = 20)
+GSEA_kegg_dotplot
+
+if(!dir.exists("../../Result/figure/KEGG")){
+  dir.create("../../Result/figure/KEGG", recursive = T)
+}
+ggsave("../../Result/figure/KEGG/GSEA_KEGG_barplot.pdf", GSEA_kegg_dotplot, width = 8, height = 6)
+```
+
+* visualization: KEGG Gene-Concept Network
+```{r}
+GSEA_kegg_network <- plot_Escore(dataset = GSEA_kegg, type = "network", number = 20)
+GSEA_kegg_network
+ggsave("../../Result/figure/KEGG/GSEA_KEGG_network.pdf", GSEA_kegg_network, width = 8, height = 8)
+```
+
+* visualization: KEGG Enrichment Map
+```{r}
+GSEA_kegg_enrichment <- plot_Escore(dataset = GSEA_kegg, type = "enrichment", number = 20)
+GSEA_kegg_enrichment
+ggsave("../../Result/figure/KEGG/GSEA_KEGG_enrichment.pdf", GSEA_kegg_enrichment, width = 8, height = 8)
+```
+
+* visualization: KEGG running score and preranked list of GSEA result
+```{r}
+# Oxidative phosphorylation
+GSEA_kegg_Oxidative_phosphorylation <- plot_Escore(dataset = GSEA_kegg, type = "GSEA", pathway = "Oxidative phosphorylation")
+GSEA_kegg_Oxidative_phosphorylation
+ggsave("../../Result/figure/KEGG/GSEA_KEGG_Oxidative_phosphorylation.pdf", GSEA_kegg_Oxidative_phosphorylation, width = 8, height = 8)
+
+# Ribosome
+GSEA_kegg_Ribosome <- plot_Escore(dataset = GSEA_kegg, type = "GSEA", pathway = "Ribosome")
+GSEA_kegg_Ribosome
+ggsave("../../Result/figure/KEGG/GSEA_KEGG_Ribosome.pdf", GSEA_kegg_Ribosome, width = 8, height = 8)
+
+# Cytokine-cytokine receptor interaction
+GSEA_kegg_Cytokine <- plot_Escore(dataset = GSEA_kegg, type = "GSEA", pathway = "Cytokine-cytokine receptor interaction")
+GSEA_kegg_Cytokine
+ggsave("../../Result/figure/KEGG/GSEA_KEGG_Cytokine.pdf", GSEA_kegg_Cytokine, width = 8, height = 8)
+```
+
+* visualization: KEGG pathway view
+```{r}
+# Cytokine-cytokine receptor interaction
+plot_Escore(dataset = GSEA_kegg, type = "pathview", pathid = "hsa04060")
+```
+
+### version
+```{r}
+sessionInfo()
+```
+
+
+### Reference 
+
+1. [Functional Enrichment Analysis Methods](http://yulab-smu.top/clusterProfiler-book/chapter2.html) 
+
+2. [Visualization of Functional Enrichment Result](http://yulab-smu.top/clusterProfiler-book/chapter12.html#enrichment-map)

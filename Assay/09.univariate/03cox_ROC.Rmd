@@ -1,0 +1,180 @@
+---
+title: "univariate Cox-PH analysis: multiROC"
+date: "Created: 2021-01-23; updated: `r Sys.Date()`"
+author: 
+  - name: "Hua Zou"
+    email: "zouhua1@outlook.com"
+output: 
+  html_notebook:
+    codes: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = F, message = F)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(survival)
+library(survminer)
+library(data.table)
+library(stringr)
+library(survivalROC)
+
+rm(list = ls())
+options(stringsAsFactors = F)
+options(future.globals.maxSize = 1000 * 1024^2)
+```
+
+
+### load data
+```{r}
+phen <- fread("../../Result/phenotype/phenotype_cluster.csv")
+```
+
+
+### Function
+
+```{r}
+get_clinical <- function(x){
+  
+  # dat_clin <- x
+  
+  # pathologic_T 
+  dat_clin <- x
+  dat_clin$Te1 <- str_extract(dat_clin$TNM, "T\\d[a-z]+")
+  dat_clin$Te2 <- str_extract(dat_clin$TNM, "T\\d")
+  dat_clin$Te1 <- with(dat_clin, ifelse(is.na(Te1), Te2, Te1))
+  dat_clin$Te2[dat_clin$Te2 == "T1"] <- 1
+  dat_clin$Te2[dat_clin$Te2 == "T2"] <- 2
+  dat_clin$Te2[dat_clin$Te2 == "T3"] <- 3
+  dat_clin$Te2[dat_clin$Te2 == "T4"] <- 4
+  
+  # pathologic_N
+  dat_clin$N <- str_extract(dat_clin$TNM, "N\\d")
+  dat_clin$N <- str_extract(dat_clin$N, "\\d")
+  
+  # pathologic_M
+  dat_clin$M <- str_extract(dat_clin$TNM, "M\\d")
+  dat_clin$M <- str_extract(dat_clin$M, "\\d")
+
+  # Gender
+  dat_clin$Gender <- ifelse(dat_clin$Gender == "MALE", "Male", "Female")
+  
+  # stage
+  dat_clin$Stage1 <- str_trim(str_extract(dat_clin$Stage, "\\s[H-Z]+"),
+                              side = c("both", "left", "right"))
+  # table(dat_clin$Stage1)
+  dat_clin$Stage1[dat_clin$Stage1 == "I"] <- 1
+  dat_clin$Stage1[dat_clin$Stage1 == "II"] <- 2
+  dat_clin$Stage1[dat_clin$Stage1 == "III"] <- 3
+  dat_clin$Stage1[dat_clin$Stage1 == "IV"] <- 4
+  
+  
+  res <- dat_clin %>% dplyr::select(Barcode, OS.Time, OS, Age,
+                                    Gender, Race, laterality, 
+                                    Stage1, Te2, Cluster) %>%
+    dplyr::rename(Stage=Stage1, T=Te2) 
+  
+  return(res)  
+}
+
+
+# univariate cox ph
+get_multiROC <- function(metadata=dat){
+  
+  # metadata=dat
+  
+  datphe <- metadata %>% column_to_rownames("Barcode") %>% 
+    dplyr::select(OS.Time, OS) 
+  datprf <- metadata %>% column_to_rownames("Barcode") %>%
+    dplyr::select(-c("OS.Time", "OS")) 
+  
+  uni_cox_res <- apply(datprf, 2, function(x, phe){ 
+    dat <- cbind(phe, Value=x)
+    cox <- coxph(Surv(OS.Time, OS) ~ Value, data = dat)
+    tmp <- summary(cox)
+    wald <- as.numeric(tmp$waldtest)
+    lg <- as.numeric(tmp$logtest)
+    res <- cbind(wald, lg)     
+    
+    },datphe) %>% t() %>% data.frame() %>%
+    setNames(c("Wald_test", "Wald_df", "Wald_pvlaue", 
+               "lg_rank", "lg_rank_df", "lg_rank_pvlaue")) %>%
+    rownames_to_column("FeatureID") %>%
+    mutate(FDR=p.adjust(lg_rank_pvlaue, method = "BH")) %>%
+    arrange(FDR) %>%
+    mutate(Status=ifelse(FDR < 0.05, "Remain", "Discard")) 
+  
+  
+  # multiple variate cox ph
+  uni_cox_feature <- uni_cox_res %>% filter(Status == "Remain")
+  datprf_sig <- datprf %>% dplyr::select(uni_cox_feature$FeatureID) %>%
+    rownames_to_column("Barcode") %>%
+    inner_join(datphe %>% rownames_to_column("Barcode"),
+               by = "Barcode") %>%
+    column_to_rownames("Barcode")
+  
+  multiCox <- coxph(Surv(OS.Time, OS) ~ ., data = datprf_sig)
+  multiCox_sum <- summary(multiCox)
+  
+  multiCox_res <- with(multiCox_sum, 
+              cbind(coeff=coefficients[,1],
+                    HR=conf.int[,"exp(coef)"],
+                    HR.95L=conf.int[,"lower .95"],
+                    HR.95H=conf.int[,"upper .95"],
+                    pvalue=coefficients[,"Pr(>|z|)"]))
+  
+  #return(res)
+  
+  rocCol <- rainbow(ncol(datprf_sig) - 2)
+  aucText=c()
+  par(oma=c(0.5,1,0,1),font.lab=1.5,font.axis=1.5)
+  roc <- survivalROC(Stime = datprf_sig$OS.Time, 
+                  status = datprf_sig$OS, 
+                  marker = datprf_sig$Stage, 
+                  predict.time = 1, method = "KM")
+  plot(roc$FP, roc$TP,
+       type = "l", xlim = c(0,1), ylim = c(0,1), col=rocCol[1],
+       xlab="1-Specificity", ylab="Sensitivity",
+       lwd=2, cex.main=1.3, cex.lab=1.2, cex.axis=1.2, font=1.2)
+  aucText <- c(aucText, paste0("Stage"," (AUC=",sprintf("%.3f", roc$AUC), ")"))
+  abline(0, 1)
+  
+  j=1
+  for (i in colnames(datprf_sig[, 2:(ncol(datprf_sig) - 2)])){
+    roc=survivalROC(Stime = datprf_sig$OS.Time,
+                    status = datprf_sig$OS,
+                    marker = datprf_sig[, i],
+                    predict.time = 1,
+                    method = "KM")
+    j=j+1
+    aucText <- c(aucText, paste0(i, " (AUC=", sprintf("%.3f", roc$AUC), ")"))
+    lines(roc$FP, roc$TP, type = "l", xlim = c(0, 1), ylim = c(0, 1), col=rocCol[j], lwd=2)
+  }
+  legend("bottomright", aucText, lwd = 2, bty = "n", col = rocCol)
+
+  
+}
+```
+
+
+### run 
+```{r, fig.width=8, fig.height=8}
+dat <- get_clinical(phen)
+get_multiROC(metadata=dat) 
+```
+
+
+### version
+```{r}
+sessionInfo()
+```
+
+
+### Reference 
+
+1. [可视化|multiROC](https://www.jianshu.com/p/874fbf43308f)
+
+2. [survivalROC](https://cran.r-project.org/web/packages/survivalROC/survivalROC.pdf)
+
+
